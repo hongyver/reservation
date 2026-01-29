@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  tennis-reservation:
+    build: .
+    container_name: tennis-reservation
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    environment:
+      - TZ=Asia/Seoul
+    # config.py를 외부에서 수정하려면 아래 주석 해제
+    volumes:
+      - /volume1/docker/apiserver/app/config.py:/app/config.py
