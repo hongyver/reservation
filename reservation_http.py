@@ -579,7 +579,7 @@ def wait_for_reservation_open():
             print(f"\r[READY] {remaining:.1f}초 후 시작!", end="", flush=True)
             time.sleep(0.05)
 
-    print("\n[GO!] 예약을 시작합니다!")
+    print("[GO!] 예약을 시작합니다!")
     return True
 
 
@@ -636,7 +636,7 @@ def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, co
     print(f"총 {len(tasks)}개 예약 작업")
     for i, (d, h, c) in enumerate(tasks):
         print(f"  [{i+1}] {d} {h:02d}:00~{h+2:02d}:00 / {c}번 코트")
-    print(f"\n설정: 최대 {MAX_RETRIES}회 재시도, 타임아웃 {REQUEST_TIMEOUT}초")
+    print(f"설정: 최대 {MAX_RETRIES}회 재시도, 타임아웃 {REQUEST_TIMEOUT}초")
     print()
 
     results = []
@@ -682,7 +682,7 @@ def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, co
         if not bots:
             return {"success": False, "results": [], "message": "모든 로그인 실패"}
 
-        print(f"\n[INFO] {len(bots)}개 세션 준비 완료")
+        print(f"[INFO] {len(bots)}개 세션 준비 완료")
 
         # 동시 접속 제한 표시
         max_concurrent = config.MAX_CONCURRENT
@@ -732,7 +732,7 @@ def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, co
     for r in results:
         status = "성공" if r["success"] else "실패"
         print(f"  {r['date']} {r['hour']:02d}:00 {r['court']}번 코트 - {status} ({r['message']})")
-    print(f"\n총 {success_count}/{total_count}건 성공")
+    print(f"총 {success_count}/{total_count}건 성공")
     print("=" * 60)
 
     return {
@@ -894,7 +894,7 @@ def search_available_slots(year, month, courts=None, hours=None, verbose=True, u
         for r in results:
             if r["date"] != current_date:
                 current_date = r["date"]
-                print(f"\n  [{r['date']} ({r['day']})]")
+                print(f"  [{r['date']} ({r['day']})]")
 
             print(f"    - {r['court']}코트 {r['time']}")
 
@@ -1028,7 +1028,7 @@ def search_all_slots(year, month, courts=None, verbose=True, user_id=None, user_
                 current_date = r["date"]
                 color = BLUE if r["is_weekend"] else ""
                 reset = RESET if r["is_weekend"] else ""
-                print(f"\n  {color}[{r['date']} ({r['day']})]{reset}")
+                print(f"  {color}[{r['date']} ({r['day']})]{reset}")
 
             color = BLUE if r["is_weekend"] else ""
             reset = RESET if r["is_weekend"] else ""

@@ -478,7 +478,7 @@ def wait_for_reservation_open():
             print(f"\r[READY] {remaining:.1f}초 후 시작!", end="", flush=True)
             time.sleep(0.05)
 
-    print("\n[GO!] 예약을 시작합니다!")
+    print("[GO!] 예약을 시작합니다!")
     return True
 
 
@@ -575,7 +575,7 @@ def run_reservation(test_mode=False, user_id=None, user_pw=None):
             success = bot.reserve_single(date, hour, court)
 
             if test_mode and success:
-                print("\n[TEST] 브라우저 유지 중... (30초)")
+                print("[TEST] 브라우저 유지 중... (30초)")
                 time.sleep(30)
 
             return success
@@ -604,7 +604,7 @@ def run_reservation(test_mode=False, user_id=None, user_pw=None):
         print("[ERROR] 로그인 성공한 브라우저가 없습니다.")
         return False
 
-    print(f"\n[INFO] {len(bots)}개 브라우저 준비 완료")
+    print(f"[INFO] {len(bots)}개 브라우저 준비 완료")
 
     # 동시 접속 제한 표시
     max_concurrent = config.MAX_CONCURRENT
@@ -646,12 +646,12 @@ def run_reservation(test_mode=False, user_id=None, user_pw=None):
         print(f"  [{i+1}] {date} {hour:02d}:00 {court}번 코트 - {status}")
         if results.get(i):
             success_count += 1
-    print(f"\n총 {success_count}/{len(bots)}건 성공")
+    print(f"총 {success_count}/{len(bots)}건 성공")
     print("=" * 50)
 
     # 테스트 모드면 브라우저 유지
     if test_mode:
-        print("\n[TEST] 브라우저 유지 중... (30초)")
+        print("[TEST] 브라우저 유지 중... (30초)")
         time.sleep(30)
 
     # 브라우저 종료

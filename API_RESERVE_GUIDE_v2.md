@@ -116,7 +116,7 @@ for r in result['results']:
     by_court[r['court']].append(r)
 
 for court in sorted(by_court.keys()):
-    print(f"\n{court}번 코트:")
+    print(f"{court}번 코트:")
     for item in by_court[court]:
         status = '✓' if item['success'] else '✗'
         print(f"  {status} {item['date']} {item['hour']:02d}:00 - {item['message']}")
@@ -198,7 +198,7 @@ for r in result['results']:
     by_date[r['date']][r['court']].append(r)
 
 for date in sorted(by_date.keys()):
-    print(f"\n{date}:")
+    print(f"{date}:")
     for court in sorted(by_date[date].keys()):
         print(f"  {court}번 코트:")
         for item in by_date[date][court]:

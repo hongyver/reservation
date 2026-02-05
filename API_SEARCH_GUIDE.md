@@ -238,7 +238,7 @@ for item in data['results']:
     by_date[item['date']].append(item)
 
 for date, slots in sorted(by_date.items()):
-    print(f"\n{date} ({slots[0]['day']}):")
+    print(f"{date} ({slots[0]['day']}):")
     for slot in slots:
         print(f"  {slot['court']}번 코트 {slot['time']}")
 ```
@@ -264,7 +264,7 @@ print(f"휴장일: {data['skipped_dates']}")
 
 # 주말만 필터링
 weekends = [r for r in data['results'] if r['is_weekend']]
-print(f"\n주말: {len(weekends)}건")
+print(f"주말: {len(weekends)}건")
 
 # 평일만 필터링
 weekdays = [r for r in data['results'] if not r['is_weekend']]
@@ -272,7 +272,7 @@ print(f"평일: {len(weekdays)}건")
 
 # 특정 시간대만 필터링 (아침 6-10시)
 morning = [r for r in data['results'] if r['hour'] in [6, 8]]
-print(f"\n아침 시간대: {len(morning)}건")
+print(f"아침 시간대: {len(morning)}건")
 
 # 특정 코트만 필터링
 court3 = [r for r in data['results'] if r['court'] == 3]

@@ -199,7 +199,7 @@ def reserve():
             if res["court"] not in [1, 2, 3, 4]:
                 return jsonify({"error": f"잘못된 코트 번호: {res['court']} (1-4)"}), 400
 
-        print(f"\n[API] 예약 요청 수신 (상세 지정)")
+        print(f"[API] 예약 요청 수신 (상세 지정)")
         print(f"  총 {len(reservations)}건")
         for res in reservations:
             print(f"    - {res['date']} {res['hour']:02d}:00 {res['court']}번 코트")
@@ -257,7 +257,7 @@ def reserve():
                         "court": court
                     })
 
-        print(f"\n[API] 예약 요청 수신 (코트별 시간 지정)")
+        print(f"[API] 예약 요청 수신 (코트별 시간 지정)")
         print(f"  총 {len(reservations)}건")
         for res in reservations:
             print(f"    - {res['date']} {res['hour']:02d}:00 {res['court']}번 코트")
@@ -312,7 +312,7 @@ def reserve():
         if court not in [1, 2, 3, 4]:
             return jsonify({"error": f"잘못된 코트 번호: {court} (1-4)"}), 400
 
-    print(f"\n[API] 예약 요청 수신")
+    print(f"[API] 예약 요청 수신")
     print(f"  날짜: {dates}")
     print(f"  시간: {hours}")
     print(f"  코트: {courts}")
@@ -372,7 +372,7 @@ def reserve_single():
             "error": "user_id 또는 user_pw 필요 (요청 본문 또는 환경변수 TENNIS_USER_ID, TENNIS_USER_PW)"
         }), 400
 
-    print(f"\n[API] 단일 예약 요청: {date} {hour:02d}:00 / {court}번 코트")
+    print(f"[API] 단일 예약 요청: {date} {hour:02d}:00 / {court}번 코트")
 
     bot = TennisReservationHTTP()
 
@@ -427,7 +427,7 @@ def search_weekend():
             "error": "user_id 또는 user_pw 필요 (요청 본문 또는 환경변수 TENNIS_USER_ID, TENNIS_USER_PW)"
         }), 400
 
-    print(f"\n[API] 주말 빈자리 검색: {year}년 {month}월")
+    print(f"[API] 주말 빈자리 검색: {year}년 {month}월")
 
     result = search_available_slots(year, month, courts=courts, hours=hours, verbose=False, user_id=user_id, user_pw=user_pw)
 
@@ -466,7 +466,7 @@ def search_all():
             "error": "user_id 또는 user_pw 필요 (요청 본문 또는 환경변수 TENNIS_USER_ID, TENNIS_USER_PW)"
         }), 400
 
-    print(f"\n[API] 전체 빈자리 검색: {year}년 {month}월")
+    print(f"[API] 전체 빈자리 검색: {year}년 {month}월")
 
     result = search_all_slots(year, month, courts=courts, verbose=False, user_id=user_id, user_pw=user_pw)
 
