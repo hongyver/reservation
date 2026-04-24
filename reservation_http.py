@@ -9,7 +9,7 @@ Chrome 브라우저 없이 requests로 직접 HTTP 요청
 import time
 import random
 import calendar
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -517,6 +517,52 @@ class TennisReservationHTTP:
             self.session.close()
 
 
+def wait_before_login():
+    """예약 오픈 10분 전까지 로그인 없이 대기.
+
+    - RESERVATION_DAY == 0: 즉시 통과
+    - 오늘이 예약일이 아닌 경우: 즉시 통과 (기존 검증 함수가 처리)
+    - 남은 시간 > 10분: 10분 전 시각까지 슬립 대기
+    - 남은 시간 <= 10분: 즉시 통과
+    """
+    if config.RESERVATION_DAY == 0:
+        return
+
+    now = datetime.now()
+    if now.day != config.RESERVATION_DAY:
+        return
+
+    target = now.replace(
+        hour=config.RESERVATION_HOUR,
+        minute=config.RESERVATION_MINUTE,
+        second=0,
+        microsecond=0
+    )
+    login_time = target - timedelta(minutes=10)
+    remaining = (login_time - now).total_seconds()
+
+    if remaining <= 0:
+        return
+
+    print(f"[PRE-WAIT] 예약 오픈({target.strftime('%H:%M')})까지 {(target - now).total_seconds():.0f}초 남았습니다.")
+    print(f"[PRE-WAIT] 로그인은 10분 전({login_time.strftime('%H:%M:%S')})부터 시작합니다.")
+
+    while True:
+        now = datetime.now()
+        remaining = (login_time - now).total_seconds()
+        if remaining <= 0:
+            break
+        if remaining > 60:
+            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음 (슬립 중)", end="", flush=True)
+            time.sleep(30)
+        else:
+            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음", end="", flush=True)
+            time.sleep(1)
+
+    print()
+    print("[INFO] 10분 전 도달. 로그인을 시작합니다.")
+
+
 def wait_for_reservation_open():
     """예약 오픈 시간까지 대기
 
@@ -640,6 +686,10 @@ def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, co
     print()
 
     results = []
+
+    # 로그인 전 10분 전까지 대기
+    if wait_for_open:
+        wait_before_login()
 
     if len(tasks) == 1:
         # 단일 작업

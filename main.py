@@ -169,8 +169,15 @@ def test_login(user_id, user_pw):
 
     # 예약 페이지 접근 테스트
     cfg = config.RESERVATION_CONFIG
-    court = cfg["court_number"]
-    date = cfg["dates"][0] if cfg["dates"] else "2026-02-01"
+    if "reservations" in cfg:
+        court = cfg["reservations"][0]["court"]
+        date = cfg["reservations"][0]["date"]
+    elif "court_schedules" in cfg:
+        court = cfg["court_schedules"][0]["court"]
+        date = cfg["dates"][0] if cfg.get("dates") else "2026-02-01"
+    else:
+        court = cfg["court_number"]
+        date = cfg["dates"][0] if cfg.get("dates") else "2026-02-01"
 
     dt = datetime.strptime(date, "%Y-%m-%d")
     html = bot.get_reservation_page(court, dt.year, dt.month, dt.day)

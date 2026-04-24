@@ -80,11 +80,7 @@ FACILITY_TYPE = "테니스장"
 #
 RESERVATION_CONFIG = {
     "reservations": [
-        {"date": "2026-02-09", "hour": 8, "court": 1},
-        {"date": "2026-02-09", "hour": 10, "court": 1},
-        {"date": "2026-02-09", "hour": 6, "court": 2},
-        {"date": "2026-02-16", "hour": 10, "court": 3},
-        {"date": "2026-02-18", "hour": 10, "court": 4},
+        {"date": "2026-04-27", "hour": 10, "court": 1}
     ]
 }
 
@@ -111,9 +107,9 @@ RESERVATION_CONFIG = {
 # 예약 오픈 시간
 # RESERVATION_DAY = 0: 즉시 실행
 # RESERVATION_DAY = 25: 매월 25일에만 실행 (날짜가 지났거나 다른 날이면 실행 안됨)
-RESERVATION_DAY = 25
+RESERVATION_DAY = 24
 RESERVATION_HOUR = 10
-RESERVATION_MINUTE = 00
+RESERVATION_MINUTE = 40
 
 # 재시도 횟수
 MAX_RETRY = 3
