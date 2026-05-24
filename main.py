@@ -13,6 +13,7 @@
     python3 main.py --search 2026-02  # 2026년 2월 검색
 """
 
+import asyncio
 import sys
 import argparse
 from datetime import datetime
@@ -24,14 +25,12 @@ import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import config
-from reservation_http import (
-    TennisReservationHTTP,
-    run_reservation_http,
-    search_available_slots,
-    search_all_slots,
-    MAX_RETRIES,
-    REQUEST_TIMEOUT
+from reservation_async import (
+    run_reservation_async,
+    search_available_slots_async,
+    search_all_slots_async,
 )
+from reservation_http import TennisReservationHTTP
 
 
 def get_credentials():
@@ -147,8 +146,8 @@ def print_config():
     print()
 
     print("[접속 폭주 대응 설정]")
-    print(f"  최대 재시도: {MAX_RETRIES}회")
-    print(f"  타임아웃: 연결 {REQUEST_TIMEOUT[0]}초, 읽기 {REQUEST_TIMEOUT[1]}초")
+    print(f"  최대 재시도: {config.MAX_RETRIES}회")
+    print(f"  타임아웃: 연결 {config.CONNECTION_TIMEOUT}초, 읽기 {config.READ_TIMEOUT}초")
     print()
 
     return True
@@ -324,9 +323,11 @@ def main():
     if args.search:
         try:
             year, month = parse_search_month(args.search)
-            result = search_available_slots(year, month, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                search_available_slots_async(year, month, user_id=user_id, user_pw=user_pw)
+            )
             sys.exit(0 if result.get("total", 0) > 0 else 1)
-        except ValueError as e:
+        except ValueError:
             print(f"[ERROR] 잘못된 월 형식: {args.search}")
             print("[INFO] 사용법: --search 2 또는 --search 2026-02")
             sys.exit(1)
@@ -335,9 +336,11 @@ def main():
     if args.search2:
         try:
             year, month = parse_search_month(args.search2)
-            result = search_all_slots(year, month, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                search_all_slots_async(year, month, user_id=user_id, user_pw=user_pw)
+            )
             sys.exit(0 if result.get("total", 0) > 0 else 1)
-        except ValueError as e:
+        except ValueError:
             print(f"[ERROR] 잘못된 월 형식: {args.search2}")
             print("[INFO] 사용법: --search2 2 또는 --search2 2026-02")
             sys.exit(1)
@@ -373,7 +376,9 @@ def main():
         if args.browser:
             success = run_browser_mode(test_mode=True, user_id=user_id, user_pw=user_pw)
         else:
-            result = run_reservation_http(test_mode=True, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                run_reservation_async(test_mode=True, user_id=user_id, user_pw=user_pw)
+            )
             success = result.get("success", False)
 
         sys.exit(0 if success else 1)
@@ -390,7 +395,9 @@ def main():
     if args.browser:
         success = run_browser_mode(test_mode=False, user_id=user_id, user_pw=user_pw)
     else:
-        result = run_reservation_http(test_mode=False, user_id=user_id, user_pw=user_pw)
+        result = asyncio.run(
+            run_reservation_async(test_mode=False, user_id=user_id, user_pw=user_pw)
+        )
         success = result.get("success", False)
 
     sys.exit(0 if success else 1)

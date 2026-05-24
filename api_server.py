@@ -20,17 +20,19 @@ n8n 호출 예시:
 """
 
 import argparse
+import asyncio
 import urllib3
 from flask import Flask, request, jsonify
 from datetime import datetime
 
 import config
-from reservation_http import (
-    TennisReservationHTTP,
-    run_reservation_http,
-    search_available_slots,
-    search_all_slots
+from reservation_async import (
+    TennisReservationAsync,
+    run_reservation_async,
+    search_available_slots_async,
+    search_all_slots_async,
 )
+from reservation_http import TennisReservationHTTP
 
 # SSL 경고 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -50,12 +52,12 @@ def health():
 @app.route("/config", methods=["GET"])
 def get_config():
     """현재 설정 조회"""
-    cfg = config.RESERVATION_CONFIG
     return jsonify({
-        "dates": cfg["dates"],
-        "hours": cfg["hours"],
-        "court_number": cfg["court_number"],
-        "site_url": config.MAIN_URL
+        "config": config.RESERVATION_CONFIG,
+        "site_url": config.MAIN_URL,
+        "reservation_day": config.RESERVATION_DAY,
+        "reservation_hour": config.RESERVATION_HOUR,
+        "reservation_minute": config.RESERVATION_MINUTE,
     })
 
 
@@ -87,7 +89,14 @@ def check_slots():
     data = request.get_json() or {}
 
     date_str = data.get("date")
-    court = data.get("court", config.RESERVATION_CONFIG["court_number"])
+    _cfg = config.RESERVATION_CONFIG
+    if "reservations" in _cfg:
+        _default_court = _cfg["reservations"][0]["court"]
+    elif "court_schedules" in _cfg:
+        _default_court = _cfg["court_schedules"][0]["court"]
+    else:
+        _default_court = _cfg.get("court_number", 1)
+    court = data.get("court", _default_court)
 
     if not date_str:
         return jsonify({"error": "date 필드 필요 (YYYY-MM-DD)"}), 400
@@ -106,16 +115,19 @@ def check_slots():
             "error": "user_id 또는 user_pw 필요 (요청 본문 또는 환경변수 TENNIS_USER_ID, TENNIS_USER_PW)"
         }), 400
 
-    bot = TennisReservationHTTP()
+    async def _check():
+        async with TennisReservationAsync() as bot:
+            if not await bot.login(user_id, user_pw):
+                return None, None
+            html = await bot.get_reservation_page(court, dt.year, dt.month, dt.day)
+            if not html:
+                return None, None
+            return bot.get_available_slots(html), None
 
-    if not bot.login(user_id, user_pw):
-        return jsonify({"error": "로그인 실패"}), 401
+    slots, _ = asyncio.run(_check())
 
-    html = bot.get_reservation_page(court, dt.year, dt.month, dt.day)
-    if not html:
-        return jsonify({"error": "예약 페이지 조회 실패"}), 500
-
-    slots = bot.get_available_slots(html)
+    if slots is None:
+        return jsonify({"error": "로그인 실패 또는 예약 페이지 조회 실패"}), 500
 
     return jsonify({
         "date": date_str,
@@ -192,11 +204,11 @@ def reserve():
                 return jsonify({"error": f"잘못된 날짜 형식: {res['date']} (YYYY-MM-DD 필요)"}), 400
 
             # 시간 검증
-            if res["hour"] not in [6, 8, 10, 12, 14, 16, 18, 20]:
+            if res["hour"] not in config.AVAILABLE_HOURS:
                 return jsonify({"error": f"잘못된 시간: {res['hour']} (6, 8, 10 등 2시간 단위)"}), 400
 
             # 코트 검증
-            if res["court"] not in [1, 2, 3, 4]:
+            if res["court"] not in config.ALL_COURTS:
                 return jsonify({"error": f"잘못된 코트 번호: {res['court']} (1-4)"}), 400
 
         print(f"[API] 예약 요청 수신 (상세 지정)")
@@ -205,12 +217,13 @@ def reserve():
             print(f"    - {res['date']} {res['hour']:02d}:00 {res['court']}번 코트")
 
         # 예약 실행
-        result = run_reservation_http(
+        result = asyncio.run(run_reservation_async(
             test_mode=test_mode,
             reservations=reservations,
             user_id=user_id,
-            user_pw=user_pw
-        )
+            user_pw=user_pw,
+            wait_for_open=False,
+        ))
         return jsonify(result)
 
     # 방법 3: court_schedules로 코트별 시간 지정
@@ -240,12 +253,12 @@ def reserve():
             hours = schedule["hours"]
 
             # 코트 검증
-            if court not in [1, 2, 3, 4]:
+            if court not in config.ALL_COURTS:
                 return jsonify({"error": f"잘못된 코트 번호: {court} (1-4)"}), 400
 
             # 시간 검증
             for h in hours:
-                if h not in [6, 8, 10, 12, 14, 16, 18, 20]:
+                if h not in config.AVAILABLE_HOURS:
                     return jsonify({"error": f"잘못된 시간: {h} (6, 8, 10 등 2시간 단위)"}), 400
 
             # 날짜 × 시간 조합
@@ -263,12 +276,13 @@ def reserve():
             print(f"    - {res['date']} {res['hour']:02d}:00 {res['court']}번 코트")
 
         # 예약 실행
-        result = run_reservation_http(
+        result = asyncio.run(run_reservation_async(
             test_mode=test_mode,
             reservations=reservations,
             user_id=user_id,
-            user_pw=user_pw
-        )
+            user_pw=user_pw,
+            wait_for_open=False,
+        ))
         return jsonify(result)
 
     # 방법 1: 기존 방식 (dates × hours × courts)
@@ -304,12 +318,12 @@ def reserve():
 
     # 시간 검증
     for h in hours:
-        if h not in [6, 8, 10, 12, 14, 16, 18, 20]:
+        if h not in config.AVAILABLE_HOURS:
             return jsonify({"error": f"잘못된 시간: {h} (6, 8, 10 등 2시간 단위)"}), 400
 
     # 코트 검증
     for court in courts:
-        if court not in [1, 2, 3, 4]:
+        if court not in config.ALL_COURTS:
             return jsonify({"error": f"잘못된 코트 번호: {court} (1-4)"}), 400
 
     print(f"[API] 예약 요청 수신")
@@ -319,14 +333,15 @@ def reserve():
     print(f"  테스트: {test_mode}")
 
     # 예약 실행
-    result = run_reservation_http(
+    result = asyncio.run(run_reservation_async(
         test_mode=test_mode,
         dates=dates,
         hours=hours,
         courts=courts,
         user_id=user_id,
-        user_pw=user_pw
-    )
+        user_pw=user_pw,
+        wait_for_open=False,
+    ))
 
     return jsonify(result)
 
@@ -349,7 +364,14 @@ def reserve_single():
 
     date = data.get("date")
     hour = data.get("hour")
-    court = data.get("court", config.RESERVATION_CONFIG["court_number"])
+    _cfg = config.RESERVATION_CONFIG
+    if "reservations" in _cfg:
+        _default_court = _cfg["reservations"][0]["court"]
+    elif "court_schedules" in _cfg:
+        _default_court = _cfg["court_schedules"][0]["court"]
+    else:
+        _default_court = _cfg.get("court_number", 1)
+    court = data.get("court", _default_court)
     test_mode = data.get("test_mode", False)
 
     if not date:
@@ -374,15 +396,13 @@ def reserve_single():
 
     print(f"[API] 단일 예약 요청: {date} {hour:02d}:00 / {court}번 코트")
 
-    bot = TennisReservationHTTP()
+    async def _reserve():
+        async with TennisReservationAsync() as bot:
+            if not await bot.login(user_id, user_pw):
+                return False, "로그인 실패"
+            return await bot.reserve(date, hour, court, test_mode)
 
-    if not bot.login(user_id, user_pw):
-        return jsonify({
-            "success": False,
-            "message": "로그인 실패"
-        }), 401
-
-    success, message = bot.reserve(date, hour, court, test_mode)
+    success, message = asyncio.run(_reserve())
 
     return jsonify({
         "success": success,
@@ -415,8 +435,8 @@ def search_weekend():
     if not year or not month:
         return jsonify({"error": "year, month 필드 필요"}), 400
 
-    courts = data.get("courts", [1, 2, 3, 4])
-    hours = data.get("hours", [6, 8, 10])
+    courts = data.get("courts", config.ALL_COURTS)
+    hours = data.get("hours", config.SEARCH_DEFAULT_HOURS)
 
     # 로그인 정보
     user_id = data.get("user_id") or config.USER_ID
@@ -429,7 +449,10 @@ def search_weekend():
 
     print(f"[API] 주말 빈자리 검색: {year}년 {month}월")
 
-    result = search_available_slots(year, month, courts=courts, hours=hours, verbose=False, user_id=user_id, user_pw=user_pw)
+    result = asyncio.run(search_available_slots_async(
+        year, month, courts=courts, hours=hours, verbose=False,
+        user_id=user_id, user_pw=user_pw,
+    ))
 
     return jsonify(result)
 
@@ -455,7 +478,7 @@ def search_all():
     if not year or not month:
         return jsonify({"error": "year, month 필드 필요"}), 400
 
-    courts = data.get("courts", [1, 2, 3, 4])
+    courts = data.get("courts", config.ALL_COURTS)
 
     # 로그인 정보
     user_id = data.get("user_id") or config.USER_ID
@@ -468,15 +491,18 @@ def search_all():
 
     print(f"[API] 전체 빈자리 검색: {year}년 {month}월")
 
-    result = search_all_slots(year, month, courts=courts, verbose=False, user_id=user_id, user_pw=user_pw)
+    result = asyncio.run(search_all_slots_async(
+        year, month, courts=courts, verbose=False,
+        user_id=user_id, user_pw=user_pw,
+    ))
 
     return jsonify(result)
 
 
 def main():
     parser = argparse.ArgumentParser(description="테니스장 예약 API 서버")
-    parser.add_argument("--host", default="0.0.0.0", help="바인딩 호스트 (기본: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=5000, help="포트 번호 (기본: 5000)")
+    parser.add_argument("--host", default=config.API_HOST, help=f"바인딩 호스트 (기본: {config.API_HOST})")
+    parser.add_argument("--port", type=int, default=config.API_PORT, help=f"포트 번호 (기본: {config.API_PORT})")
     parser.add_argument("--debug", action="store_true", help="디버그 모드")
     args = parser.parse_args()
 
