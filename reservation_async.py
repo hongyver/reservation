@@ -85,8 +85,15 @@ class TennisReservationAsync:
             try:
                 async with self.session.request(method, url, **kwargs) as resp:
                     resp.raise_for_status()
-                    # 인코딩 자동 감지 (서버가 EUC-KR로 응답하므로 utf-8 고정 불가)
-                    return await resp.text()
+                    # 서버가 EUC-KR 선언이지만 UTF-8 바이트를 혼용하는 경우 대응:
+                    # 바이트를 직접 읽어 euc-kr → cp949 → utf-8 → replace 순으로 시도
+                    raw = await resp.read()
+                    for enc in ("euc-kr", "cp949", "utf-8"):
+                        try:
+                            return raw.decode(enc)
+                        except UnicodeDecodeError:
+                            continue
+                    return raw.decode("utf-8", errors="replace")
 
             except aiohttp.ClientResponseError as e:
                 last_error = e
@@ -284,30 +291,40 @@ class TennisReservationAsync:
                     "POST", proc_url, data=form_data, max_retries=3
                 )
 
+                # ── 실패 조건 (먼저 검사) ──────────────────────────────
+                # 실패 메시지에도 "완료"가 포함되므로 반드시 성공 조건보다 앞에 둔다.
+                # 실제 서버 응답 확인:
+                #   실패(중복): alert("예약이 완료된 시간입니다.(3)")
+                #   실패(1건): alert("한 건 이상 예약이 완료되어 있습니다.")
+                if "한 건 이상 예약" in result_text:
+                    self._log("[WARN] 이미 예약 있음 (1일 1건 제한)", worker_id)
+                    return False, "이미 예약 있음 (1일 1건 제한)"
+                if "예약이 완료된 시간" in result_text:
+                    self._log("[WARN] 이미 예약된 시간", worker_id)
+                    return False, "이미 예약된 시간"
+                if "이미 예약" in result_text or "중복" in result_text:
+                    self._log("[WARN] 중복 예약", worker_id)
+                    return False, "중복 예약"
+                if "마감" in result_text:
+                    self._log("[WARN] 예약 마감", worker_id)
+                    return False, "예약 마감"
+                if "존재하지않는" in result_text:
+                    self._log("[ERROR] 시간 데이터 오류", worker_id)
+                    return False, "시간 데이터 오류"
+
+                # ── 성공 조건 ──────────────────────────────────────────
+                # 실제 서버 응답: alert("대관접수가 정상적으로 완료되었습니다..")
                 if "정상적으로 완료" in result_text:
                     self._log("[SUCCESS] 대관접수 완료!", worker_id)
                     return True, "대관접수 완료"
-                elif "완료" in result_text or ", 0)" in result_text:
-                    self._log("[SUCCESS] 예약 완료!", worker_id)
-                    return True, "예약 완료"
-                elif "한 건 이상 예약" in result_text:
-                    self._log("[WARN] 이미 예약 있음 (1일 1코트 1건 제한)", worker_id)
-                    return False, "이미 예약 있음 (1일 1건 제한)"
-                elif "이미" in result_text or "중복" in result_text:
-                    self._log("[WARN] 이미 예약된 시간", worker_id)
-                    return False, "이미 예약된 시간"
-                elif "마감" in result_text:
-                    self._log("[WARN] 예약 마감", worker_id)
-                    return False, "예약 마감"
-                elif "존재하지않는" in result_text:
-                    self._log("[ERROR] 시간 데이터 오류", worker_id)
-                    return False, "시간 데이터 오류"
-                elif "alert" in result_text and "submit" in result_text:
-                    self._log("[SUCCESS] 예약 완료!", worker_id)
-                    return True, "예약 완료"
-                else:
-                    self._log("[INFO] 예약 제출 완료", worker_id)
-                    return True, "예약 제출 완료"
+
+                # ── 알 수 없는 응답: 실패로 처리 후 전체 내용 로깅 ────────
+                self._log(
+                    f"[WARN] proc.php 알 수 없는 응답 — 실패로 처리\n"
+                    f"       응답 내용: {result_text[:500]}",
+                    worker_id
+                )
+                return False, "알 수 없는 서버 응답"
 
             except Exception as e:
                 self._log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 신청 오류: {e}", worker_id)
@@ -408,16 +425,25 @@ async def run_reservation_async(
 ):
     """asyncio 기반 예약 실행.
 
-    단일 aiohttp 세션으로 1회 로그인 후 N건을 asyncio.gather로 동시 처리.
-    MAX_CONCURRENT 세마포어로 동시 접속 수 제한.
+    예약 1건 = 독립 세션(PHPSESSID) 사용.
+    같은 계정으로 동시에 apply.php → proc.php 를 병렬 요청하면
+    서버 PHP 세션 상태가 덮어쓰여져 "(1-1) 정상적인 방법으로 신청" 오류 발생.
+    따라서 각 예약 작업에 독립 세션을 부여하고, 로그인만 asyncio.gather로 병렬화한다.
+
+    흐름:
+      Phase 1 (pre-login) : N개 봇 생성 → 모두 비동기 병렬 로그인 — O(1) 시간
+      Phase 2 (wait)      : 예약 오픈 시간까지 비동기 대기
+      Phase 3 (reserve)   : Semaphore로 동시 접속 제한하며 asyncio.gather 동시 실행
 
     Args:
         wait_for_open: 예약 오픈 시간까지 대기 여부 (API 호출 시 False)
     """
     tasks = _build_tasks(dates, hours, court, courts, reservations)
+    uid = user_id or config.USER_ID
+    upw = user_pw or config.USER_PW
 
     print("=" * 60)
-    print("고양시 테니스장 자동 예약 (asyncio - 단일 세션)")
+    print("고양시 테니스장 자동 예약 (asyncio - 독립 세션)")
     print("=" * 60)
     print(f"총 {len(tasks)}개 예약 작업 | 동시 접속 제한: {config.MAX_CONCURRENT}개")
     for i, (d, h, c) in enumerate(tasks):
@@ -425,39 +451,57 @@ async def run_reservation_async(
     print(f"설정: 최대 {config.MAX_RETRIES}회 재시도, 타임아웃 ({config.CONNECTION_TIMEOUT},{config.READ_TIMEOUT})초")
     print()
 
-    async with TennisReservationAsync() as bot:
-        # 로그인 전 대기
-        if wait_for_open:
-            await wait_before_login_async()
+    # ── Phase 1: 로그인 전 대기 ──────────────────────────────────
+    if wait_for_open:
+        await wait_before_login_async()
 
-        # ★ 핵심: 단 1회 로그인
-        uid = user_id or config.USER_ID
-        upw = user_pw or config.USER_PW
-        if not await bot.login(uid, upw):
-            return {"success": False, "results": [], "message": "로그인 실패"}
+    # ── Phase 2: N개 봇 생성 + 병렬 로그인 (O(1)) ───────────────
+    async def create_bot(task_idx):
+        bot = TennisReservationAsync()
+        await bot._create_session()
+        bot.worker_id = task_idx
+        if await bot.login(uid, upw):
+            await bot.warmup_connection()
+            return bot
+        await bot.close()
+        return None
 
-        await bot.warmup_connection()
+    print(f"[INFO] {len(tasks)}개 세션 병렬 로그인 시작...")
+    bot_list = await asyncio.gather(*[create_bot(i + 1) for i in range(len(tasks))])
+    bots = [(bot, d, h, c)
+            for bot, (d, h, c) in zip(bot_list, tasks)
+            if bot is not None]
 
-        # 예약 오픈 시간까지 비동기 대기
-        if wait_for_open:
-            if not await wait_for_reservation_open_async():
-                return {
-                    "success": False, "results": [],
-                    "message": "예약일이 아니거나 이미 지났습니다"
-                }
+    failed_login = len(tasks) - len(bots)
+    if failed_login:
+        print(f"[WARN] {failed_login}개 세션 로그인 실패")
+    if not bots:
+        return {"success": False, "results": [], "message": "모든 로그인 실패"}
+    print(f"[INFO] {len(bots)}개 세션 준비 완료")
 
-        # ★ 핵심: Semaphore로 동시 접속 수 제한 + asyncio.gather로 진정한 동시 실행
-        sem = asyncio.Semaphore(config.MAX_CONCURRENT)
+    # ── Phase 3: 예약 오픈 시간까지 비동기 대기 ──────────────────
+    if wait_for_open:
+        if not await wait_for_reservation_open_async():
+            for bot, *_ in bots:
+                await bot.close()
+            return {"success": False, "results": [],
+                    "message": "예약일이 아니거나 이미 지났습니다"}
 
-        async def worker(task_idx, d, h, c):
-            async with sem:
+    # ── Phase 4: 동시 예약 실행 (독립 세션) ─────────────────────
+    sem = asyncio.Semaphore(config.MAX_CONCURRENT)
+
+    async def worker(bot, task_idx, d, h, c):
+        async with sem:
+            try:
                 success, message = await bot.reserve(d, h, c, test_mode, worker_id=task_idx)
                 return {"date": d, "hour": h, "court": c,
                         "success": success, "message": message}
+            finally:
+                await bot.close()
 
-        results = list(await asyncio.gather(
-            *[worker(i+1, d, h, c) for i, (d, h, c) in enumerate(tasks)]
-        ))
+    results = list(await asyncio.gather(
+        *[worker(bot, i + 1, d, h, c) for i, (bot, d, h, c) in enumerate(bots)]
+    ))
 
     success_count = sum(1 for r in results if r["success"])
     print()
