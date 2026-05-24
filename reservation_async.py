@@ -85,7 +85,8 @@ class TennisReservationAsync:
             try:
                 async with self.session.request(method, url, **kwargs) as resp:
                     resp.raise_for_status()
-                    return await resp.text(encoding="utf-8", errors="replace")
+                    # 인코딩 자동 감지 (서버가 EUC-KR로 응답하므로 utf-8 고정 불가)
+                    return await resp.text()
 
             except aiohttp.ClientResponseError as e:
                 last_error = e
