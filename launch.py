@@ -24,6 +24,7 @@ GROUP_SIZE(기본 4)개씩 묶어 그룹마다 새 터미널 창을 열고
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -34,6 +35,11 @@ TMUX_SESSION_PREFIX = "tennis"   # 세션 이름: tennis_1, tennis_2, ...
 SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_PY = SCRIPT_DIR / "main.py"
 TMP_DIR = Path("/tmp")
+
+# tmux 절대 경로: iTerm2 새 창의 기본 PATH(/usr/bin:/bin 등)에는
+# /opt/homebrew/bin 이 없어서 'tmux: command not found' 가 발생하므로
+# 현재 환경에서 경로를 확정해 스크립트에 하드코딩한다.
+TMUX_BIN = shutil.which("tmux") or "tmux"
 
 
 # ─── 계정 파싱 ────────────────────────────────────────────────────────────────
@@ -128,38 +134,42 @@ def create_group_scripts(group, session_name, extra_flags, group_idx):
     n = len(group)
     user_ids = ", ".join(a["user_id"] for a in group)
 
+    # TMUX_BIN: 현재 환경에서 확정한 절대 경로를 스크립트에 하드코딩.
+    # iTerm2 새 창은 non-login shell로 실행되어 기본 PATH가
+    # /usr/bin:/bin:/usr/sbin:/sbin 뿐이므로 Homebrew tmux를 찾지 못한다.
     lines = [
         "#!/bin/bash",
         f'SESSION="{session_name}"',
+        f'TMUX="{TMUX_BIN}"',
         "",
         "# 기존 세션이 있으면 제거",
-        'tmux kill-session -t "$SESSION" 2>/dev/null || true',
+        '"$TMUX" kill-session -t "$SESSION" 2>/dev/null || true',
         "",
         f"# 그룹 {group_idx}: {user_ids}",
-        f'tmux new-session -d -s "$SESSION" "{acct_paths[0]}"',
+        f'"$TMUX" new-session -d -s "$SESSION" "{acct_paths[0]}"',
     ]
 
     if n >= 2:
         lines.append(
-            f'tmux split-window -t "$SESSION:0.0" -h "{acct_paths[1]}"'
+            f'"$TMUX" split-window -t "$SESSION:0.0" -h "{acct_paths[1]}"'
         )
     if n >= 3:
         lines.append(
-            f'tmux split-window -t "$SESSION:0.0" -v "{acct_paths[2]}"'
+            f'"$TMUX" split-window -t "$SESSION:0.0" -v "{acct_paths[2]}"'
         )
     if n >= 4:
         lines.append(
-            f'tmux split-window -t "$SESSION:0.1" -v "{acct_paths[3]}"'
+            f'"$TMUX" split-window -t "$SESSION:0.1" -v "{acct_paths[3]}"'
         )
 
     if n > 1:
-        lines.append('tmux select-layout -t "$SESSION:0" tiled')
+        lines.append('"$TMUX" select-layout -t "$SESSION:0" tiled')
 
     lines += [
-        'tmux select-pane -t "$SESSION:0.0"',
+        '"$TMUX" select-pane -t "$SESSION:0.0"',
         "",
         "# bash 프로세스를 tmux attach 로 교체 → 터미널 창이 tmux 세션을 직접 표시",
-        'exec tmux attach-session -t "$SESSION"',
+        'exec "$TMUX" attach-session -t "$SESSION"',
     ]
 
     group_path = TMP_DIR / f"tennis_group_{group_idx}.sh"
@@ -203,7 +213,7 @@ def open_new_terminal(script_path, terminal_app, dry_run=False):
 
 def tmux_available():
     try:
-        subprocess.run(["tmux", "-V"], capture_output=True, check=True)
+        subprocess.run([TMUX_BIN, "-V"], capture_output=True, check=True)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
@@ -230,7 +240,7 @@ def run_multi_terminal(accounts, extra_flags, group_size, dry_run=False):
         # 기존 세션 제거
         if not dry_run:
             subprocess.run(
-                ["tmux", "kill-session", "-t", session], capture_output=True
+                [TMUX_BIN, "kill-session", "-t", session], capture_output=True
             )
 
         # 스크립트 생성
