@@ -169,11 +169,15 @@ API_PORT = int(os.environ.get("API_PORT", 5000))
 # .env의 TENNIS_RESERVATION_N 변수가 있으면 RESERVATION_CONFIG를 대체.
 # 없으면 위의 하드코딩 RESERVATION_CONFIG를 그대로 사용.
 
-def _build_reservation_config():
-    """환경변수에서 예약 조건을 조립한다.
+def _build_reservation_config_from_prefix(pfx):
+    """환경변수 pfx_RESERVATION_N / pfx_DATES 등에서 예약 조건을 조립한다.
+
+    pfx 예:
+      "TENNIS"            → 전역 단일 계정 (TENNIS_RESERVATION_1, TENNIS_DATES, ...)
+      "TENNIS_ACCOUNT_1"  → 계정 1 전용 (TENNIS_ACCOUNT_1_RESERVATION_1, ...)
 
     우선순위: 방법2(RESERVATION_N) > 방법3(COURT_N_HOURS) > 방법1(DATES+HOURS)
-    해당하는 환경변수가 없으면 None 반환 → 하드코딩 RESERVATION_CONFIG 유지.
+    해당하는 환경변수가 없으면 None 반환.
     """
 
     def _validate_date(s, key):
@@ -199,13 +203,13 @@ def _build_reservation_config():
                 f"  → 가능한 코트: {ALL_COURTS}"
             )
 
-    # ── 방법 2: TENNIS_RESERVATION_N (번호 인덱스, 1건 = 1줄) ──────────────
+    # ── 방법 2: {pfx}_RESERVATION_N ────────────────────────────────────────
     # 형식: YYYY-MM-DD:시간:코트번호
     # 예:   TENNIS_RESERVATION_1=2026-06-07:10:1
-    #       TENNIS_RESERVATION_2=2026-06-14:08:2
+    #       TENNIS_ACCOUNT_2_RESERVATION_1=2026-06-07:08:3
     reservations = []
     for i in range(1, 100):
-        key = f"TENNIS_RESERVATION_{i}"
+        key = f"{pfx}_RESERVATION_{i}"
         raw = os.environ.get(key, "").strip()
         if not raw:
             continue  # 번호 공백 허용 — 다음 번호도 계속 확인
@@ -227,17 +231,14 @@ def _build_reservation_config():
     if reservations:
         return {"reservations": reservations}
 
-    # ── 방법 3: TENNIS_DATES + TENNIS_COURT_N_HOURS ──────────────────────────
-    # 예: TENNIS_DATES=2026-06-07,2026-06-14
-    #     TENNIS_COURT_1_HOURS=8,10
-    #     TENNIS_COURT_2_HOURS=6,8
-    dates_raw = os.environ.get("TENNIS_DATES", "").strip()
+    # ── 방법 3: {pfx}_DATES + {pfx}_COURT_N_HOURS ──────────────────────────
+    dates_raw = os.environ.get(f"{pfx}_DATES", "").strip()
     court_schedules = []
     for n in ALL_COURTS:
-        h_raw = os.environ.get(f"TENNIS_COURT_{n}_HOURS", "").strip()
+        h_raw = os.environ.get(f"{pfx}_COURT_{n}_HOURS", "").strip()
         if not h_raw:
             continue
-        key = f"TENNIS_COURT_{n}_HOURS"
+        key = f"{pfx}_COURT_{n}_HOURS"
         hours = [int(h.strip()) for h in h_raw.split(",") if h.strip()]
         for h in hours:
             _validate_hour(h, key)
@@ -246,38 +247,68 @@ def _build_reservation_config():
     if dates_raw and court_schedules:
         dates = [d.strip() for d in dates_raw.split(",") if d.strip()]
         for d in dates:
-            _validate_date(d, "TENNIS_DATES")
+            _validate_date(d, f"{pfx}_DATES")
         return {"dates": dates, "court_schedules": court_schedules}
 
-    # ── 방법 1: TENNIS_DATES + TENNIS_HOURS [+ TENNIS_COURT(S)] ─────────────
-    # 예: TENNIS_DATES=2026-06-07,2026-06-14
-    #     TENNIS_HOURS=8,10
-    #     TENNIS_COURT=1          (단일 코트)
-    #     TENNIS_COURTS=1,2,3     (복수 코트 — TENNIS_COURT 대신 사용)
-    hours_raw = os.environ.get("TENNIS_HOURS", "").strip()
+    # ── 방법 1: {pfx}_DATES + {pfx}_HOURS [+ {pfx}_COURT(S)] ───────────────
+    hours_raw = os.environ.get(f"{pfx}_HOURS", "").strip()
     if dates_raw and hours_raw:
         dates = [d.strip() for d in dates_raw.split(",") if d.strip()]
         hours = [int(h.strip()) for h in hours_raw.split(",") if h.strip()]
         for d in dates:
-            _validate_date(d, "TENNIS_DATES")
+            _validate_date(d, f"{pfx}_DATES")
         for h in hours:
-            _validate_hour(h, "TENNIS_HOURS")
+            _validate_hour(h, f"{pfx}_HOURS")
 
-        courts_raw = os.environ.get("TENNIS_COURTS", "").strip()
-        court_raw  = os.environ.get("TENNIS_COURT",  "").strip()
+        courts_raw = os.environ.get(f"{pfx}_COURTS", "").strip()
+        court_raw  = os.environ.get(f"{pfx}_COURT",  "").strip()
         if courts_raw:
             courts = [int(c.strip()) for c in courts_raw.split(",") if c.strip()]
             for c in courts:
-                _validate_court(c, "TENNIS_COURTS")
+                _validate_court(c, f"{pfx}_COURTS")
             return {"dates": dates, "hours": hours, "courts": courts}
         elif court_raw:
             court = int(court_raw)
-            _validate_court(court, "TENNIS_COURT")
+            _validate_court(court, f"{pfx}_COURT")
             return {"dates": dates, "hours": hours, "court_number": court}
         else:
             return {"dates": dates, "hours": hours, "court_number": 1}
 
-    return None  # 환경변수 없음 → 하드코딩 RESERVATION_CONFIG 유지
+    return None  # 환경변수 없음
+
+
+def _build_reservation_config():
+    """전역 단일 계정용 예약 조건 조립 (하위 호환 래퍼)."""
+    return _build_reservation_config_from_prefix("TENNIS")
+
+
+def load_accounts():
+    """다중 계정 설정을 환경변수에서 읽어 리스트로 반환.
+
+    .env 예시:
+        TENNIS_ACCOUNT_1_ID=user1
+        TENNIS_ACCOUNT_1_PW=pass1
+        TENNIS_ACCOUNT_1_RESERVATION_1=2026-06-07:10:1
+
+    Returns:
+        list of dict: [{"num": 1, "user_id": ..., "user_pw": ...,
+                        "reservation_config": {...} or None}, ...]
+        빈 리스트: TENNIS_ACCOUNT_* 환경변수 없음
+    """
+    accounts = []
+    for n in range(1, 100):
+        uid = os.environ.get(f"TENNIS_ACCOUNT_{n}_ID", "").strip()
+        upw = os.environ.get(f"TENNIS_ACCOUNT_{n}_PW", "").strip()
+        if not uid or not upw:
+            continue
+        res_cfg = _build_reservation_config_from_prefix(f"TENNIS_ACCOUNT_{n}")
+        accounts.append({
+            "num": n,
+            "user_id": uid,
+            "user_pw": upw,
+            "reservation_config": res_cfg,
+        })
+    return accounts
 
 
 _env_config = _build_reservation_config()

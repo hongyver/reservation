@@ -310,7 +310,22 @@ def main():
                         help="주말 예약 가능 시간 검색 (예: 2 또는 2026-02)")
     parser.add_argument("--search2", metavar="MONTH",
                         help="전체 날짜/시간 예약 가능 시간 검색 (예: 2 또는 2026-02)")
+    parser.add_argument("--account", type=int, metavar="N",
+                        help="실행할 계정 번호 (launch.py 다중 계정 모드에서 자동 호출)")
     args = parser.parse_args()
+
+    # --account N: 해당 계정 설정으로 config 오버라이드
+    if args.account:
+        accounts = config.load_accounts()
+        acct = next((a for a in accounts if a["num"] == args.account), None)
+        if not acct:
+            print(f"[ERROR] .env에 TENNIS_ACCOUNT_{args.account}_ID/PW가 없습니다.")
+            sys.exit(1)
+        config.USER_ID = acct["user_id"]
+        config.USER_PW = acct["user_pw"]
+        if acct["reservation_config"] is not None:
+            config.RESERVATION_CONFIG = acct["reservation_config"]
+        print(f"[계정 {args.account}] {acct['user_id']} 로 실행합니다.")
 
     # 검색 모드는 설정 출력 생략하지만 로그인 정보는 필요
     if args.search or args.search2:
