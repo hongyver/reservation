@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-다중 계정 tmux 런처
+다중 계정 런처 — tmux 또는 iTerm2 네이티브 split pane
 
 .env에 TENNIS_ACCOUNT_N_* 형식으로 계정을 정의하면
 GROUP_SIZE(기본 4)개씩 묶어 그룹마다 새 터미널 창을 열고
-그 안에서 tmux 세션을 시작해 pane으로 분할 표시한다.
+분할 화면으로 표시한다.
 
   계정 13개 예시:
-    그룹 1 (계정 1~4)  → 새 터미널 창 → tmux tennis_1 → 2×2 pane
-    그룹 2 (계정 5~8)  → 새 터미널 창 → tmux tennis_2 → 2×2 pane
-    그룹 3 (계정 9~12) → 새 터미널 창 → tmux tennis_3 → 2×2 pane
-    그룹 4 (계정 13)   → 새 터미널 창 → tmux tennis_4 → 1 pane
+    그룹 1 (계정 1~4)  → 새 터미널 창 → 2×2 분할
+    그룹 2 (계정 5~8)  → 새 터미널 창 → 2×2 분할
+    그룹 3 (계정 9~12) → 새 터미널 창 → 2×2 분할
+    그룹 4 (계정 13)   → 새 터미널 창 → 단일 pane
 
 사용법:
-    python3 launch.py                  # 기본 실행 (4개씩 그룹)
-    python3 launch.py --group-size 2   # 터미널 창당 최대 2개
+    python3 launch.py                  # tmux 세션 + 새 터미널 창 (기본)
+    python3 launch.py --no-tmux        # iTerm2 네이티브 split pane (tmux 없이)
+    python3 launch.py --background     # 백그라운드 subprocess + 로그 파일
+    python3 launch.py --group-size 2   # 창당 최대 2개
     python3 launch.py --test           # 테스트 모드 (대관신청 전 중단)
     python3 launch.py --check          # 로그인 테스트만
-    python3 launch.py --dry-run        # 스크립트 내용 출력 (창 미생성)
-    python3 launch.py --no-tmux        # tmux 없이 백그라운드 subprocess 실행
+    python3 launch.py --dry-run        # 실행 내용 출력만 (창 미생성)
 """
 
 import argparse
@@ -36,8 +37,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_PY = SCRIPT_DIR / "main.py"
 TMP_DIR = Path("/tmp")
 
-# tmux 절대 경로: iTerm2 새 창의 기본 PATH(/usr/bin:/bin 등)에는
-# /opt/homebrew/bin 이 없어서 'tmux: command not found' 가 발생하므로
+# iTerm2 새 창은 non-login shell로 실행되어 기본 PATH 가
+# /usr/bin:/bin:/usr/sbin:/sbin 뿐이므로 Homebrew tmux 를 찾지 못한다.
 # 현재 환경에서 경로를 확정해 스크립트에 하드코딩한다.
 TMUX_BIN = shutil.which("tmux") or "tmux"
 
@@ -94,28 +95,22 @@ def detect_terminal_app():
             return "iterm2"
     except Exception:
         pass
-
     if Path("/Applications/iTerm.app").exists():
         return "iterm2"
-
     return "terminal"
 
 
-# ─── 스크립트 생성 ────────────────────────────────────────────────────────────
+# ─── 계정 스크립트 생성 (tmux / no-tmux 공용) ───────────────────────────────
 
-def create_group_scripts(group, session_name, extra_flags, group_idx):
-    """그룹 tmux 스크립트와 계정별 실행 스크립트를 /tmp에 생성한다.
+def create_acct_scripts(group, extra_flags):
+    """계정별 /tmp/tennis_acct_N.sh 를 생성하고 경로 목록을 반환한다.
 
-    생성 파일:
-      /tmp/tennis_acct_{N}.sh     — 계정 N 단독 실행 스크립트
-      /tmp/tennis_group_{idx}.sh  — tmux 세션 생성 + pane 분할 + attach
-
-    Returns: Path — 그룹 스크립트 경로
+    tmux 모드와 no-tmux 모드 모두에서 재사용한다.
+    스크립트에 python 절대 경로를 하드코딩하므로 iTerm2의
+    제한된 PATH 환경에서도 정상 동작한다.
     """
     py = sys.executable
     flags_str = " ".join(extra_flags)
-
-    # ── 계정별 실행 스크립트 ──────────────────────────────────────────
     acct_paths = []
     for acct in group:
         path = TMP_DIR / f"tennis_acct_{acct['num']}.sh"
@@ -129,14 +124,20 @@ def create_group_scripts(group, session_name, extra_flags, group_idx):
         )
         path.chmod(0o755)
         acct_paths.append(path)
+    return acct_paths
 
-    # ── 그룹 tmux 스크립트 ───────────────────────────────────────────
+
+# ─── tmux 모드: 그룹 스크립트 생성 ──────────────────────────────────────────
+
+def create_group_scripts(group, session_name, extra_flags, group_idx):
+    """tmux 세션 생성 + pane 분할 + attach 를 담은 그룹 스크립트를 /tmp에 생성.
+
+    Returns: Path — /tmp/tennis_group_{idx}.sh
+    """
+    acct_paths = create_acct_scripts(group, extra_flags)
     n = len(group)
     user_ids = ", ".join(a["user_id"] for a in group)
 
-    # TMUX_BIN: 현재 환경에서 확정한 절대 경로를 스크립트에 하드코딩.
-    # iTerm2 새 창은 non-login shell로 실행되어 기본 PATH가
-    # /usr/bin:/bin:/usr/sbin:/sbin 뿐이므로 Homebrew tmux를 찾지 못한다.
     lines = [
         "#!/bin/bash",
         f'SESSION="{session_name}"',
@@ -175,41 +176,107 @@ def create_group_scripts(group, session_name, extra_flags, group_idx):
     group_path = TMP_DIR / f"tennis_group_{group_idx}.sh"
     group_path.write_text("\n".join(lines) + "\n")
     group_path.chmod(0o755)
-
     return group_path
 
 
-# ─── 터미널 창 열기 ──────────────────────────────────────────────────────────
+# ─── no-tmux 모드: AppleScript 생성 ─────────────────────────────────────────
 
-def open_new_terminal(script_path, terminal_app, dry_run=False):
-    """AppleScript로 새 터미널 창을 열고 그룹 스크립트를 실행한다."""
-    path_str = str(script_path)
+def build_iterm2_split_applescript(acct_paths):
+    """iTerm2 네이티브 split pane AppleScript를 생성한다.
 
-    if terminal_app == "iterm2":
-        applescript = (
-            'tell application "iTerm2"\n'
-            f'    create window with default profile command "bash {path_str}"\n'
-            'end tell'
-        )
-    else:
-        # Terminal.app: do script 는 새 창에서 실행됨
-        applescript = (
-            'tell application "Terminal"\n'
-            f'    do script "bash {path_str}"\n'
-            '    activate\n'
-            'end tell'
-        )
+    레이아웃 (n = 계정 수):
+      1개: [s1          ]
+      2개: [s1    | s2  ]
+      3개: [s1    | s2  ]
+           [s3          ]
+      4개: [s1    | s2  ]
+           [s3    | s4  ]
 
+    split 방향:
+      vertically   = 수직 divider → 좌우로 나눔 (s1 오른쪽에 s2 생성)
+      horizontally = 수평 divider → 위아래로 나눔 (s1 아래에 s3 생성)
+    """
+    n = len(acct_paths)
+    p = [str(path) for path in acct_paths]
+
+    lines = [
+        'tell application "iTerm2"',
+        '    activate',
+        '    set w to (create window with default profile)',
+        '    set s1 to current session of w',
+        f'    tell s1 to write text "{p[0]}"',
+    ]
+
+    if n >= 2:
+        lines += [
+            '    -- s2: s1 오른쪽 (수직 divider)',
+            '    tell s1',
+            '        set s2 to (split vertically with default profile)',
+            '    end tell',
+            f'    tell s2 to write text "{p[1]}"',
+        ]
+
+    if n >= 3:
+        lines += [
+            '    -- s3: s1 아래 (수평 divider)',
+            '    tell s1',
+            '        set s3 to (split horizontally with default profile)',
+            '    end tell',
+            f'    tell s3 to write text "{p[2]}"',
+        ]
+
+    if n == 4:
+        lines += [
+            '    -- s4: s2 아래 (수평 divider)',
+            '    tell s2',
+            '        set s4 to (split horizontally with default profile)',
+            '    end tell',
+            f'    tell s4 to write text "{p[3]}"',
+        ]
+
+    lines += [
+        '    -- 포커스를 좌상단(s1)으로 이동',
+        '    tell s1 to select',
+        'end tell',
+    ]
+
+    return "\n".join(lines)
+
+
+def build_terminal_tabs_applescript(acct_paths):
+    """Terminal.app에서 같은 창에 탭을 추가하는 AppleScript를 생성한다.
+
+    Terminal.app은 AppleScript split을 지원하지 않으므로
+    계정마다 새 탭으로 대체한다.
+    """
+    lines = [
+        'tell application "Terminal"',
+        '    activate',
+        f'    do script "bash {acct_paths[0]}"',
+    ]
+    for path in acct_paths[1:]:
+        lines += [
+            '    delay 0.3',
+            f'    do script "bash {path}" in front window',
+        ]
+    lines.append('end tell')
+    return "\n".join(lines)
+
+
+# ─── AppleScript 실행 공용 ───────────────────────────────────────────────────
+
+def run_osascript(applescript, dry_run=False, label="osascript"):
+    """AppleScript를 실행하거나 dry-run 시 내용을 출력한다."""
     if dry_run:
-        indent = "    "
-        formatted = applescript.replace("\n", f"\n{indent}")
-        print(f"  [osascript]\n    {formatted}")
+        print(f"  [{label}]")
+        for line in applescript.splitlines():
+            print(f"       {line}")
+        print()
         return
-
     subprocess.run(["osascript", "-e", applescript], check=True)
 
 
-# ─── 멀티 터미널 실행 ────────────────────────────────────────────────────────
+# ─── tmux 유틸 ───────────────────────────────────────────────────────────────
 
 def tmux_available():
     try:
@@ -219,37 +286,57 @@ def tmux_available():
         return False
 
 
+def open_new_terminal(script_path, terminal_app, dry_run=False):
+    """그룹 스크립트를 새 터미널 창에서 실행한다 (tmux 모드 전용)."""
+    path_str = str(script_path)
+
+    if terminal_app == "iterm2":
+        applescript = (
+            'tell application "iTerm2"\n'
+            f'    create window with default profile command "bash {path_str}"\n'
+            'end tell'
+        )
+    else:
+        applescript = (
+            'tell application "Terminal"\n'
+            f'    do script "bash {path_str}"\n'
+            '    activate\n'
+            'end tell'
+        )
+
+    run_osascript(applescript, dry_run, label="osascript (tmux)")
+
+
+# ─── 실행 모드 1: tmux ───────────────────────────────────────────────────────
+
 def run_multi_terminal(accounts, extra_flags, group_size, dry_run=False):
-    """계정을 group_size개씩 묶어 그룹마다 새 터미널 창 + tmux 세션을 생성한다."""
+    """tmux 세션 + 새 터미널 창으로 계정을 분할 실행한다."""
     groups = chunk_accounts(accounts, group_size)
     terminal_app = detect_terminal_app()
     total = len(groups)
 
     print(f"[launch] {len(accounts)}개 계정 → {total}개 터미널 창 "
           f"(창당 최대 {group_size}개 pane)")
-    print(f"[launch] 터미널 앱: {terminal_app}")
+    print(f"[launch] 모드: tmux  |  터미널 앱: {terminal_app}")
     print()
 
     for i, group in enumerate(groups, 1):
         session = f"{TMUX_SESSION_PREFIX}_{i}"
         user_ids = [a["user_id"] for a in group]
-
         print(f"  ── 그룹 {i}/{total}  세션={session}  "
               f"계정={', '.join(user_ids)}")
 
-        # 기존 세션 제거
         if not dry_run:
             subprocess.run(
                 [TMUX_BIN, "kill-session", "-t", session], capture_output=True
             )
 
-        # 스크립트 생성
         group_script = create_group_scripts(group, session, extra_flags, i)
 
         if dry_run:
+            separator = "     " + "─" * 50
             print(f"     그룹 스크립트: {group_script}")
             print()
-            separator = "     " + "─" * 50
             print(separator)
             for line in group_script.read_text().splitlines():
                 print(f"     {line}")
@@ -258,10 +345,7 @@ def run_multi_terminal(accounts, extra_flags, group_size, dry_run=False):
             print()
             continue
 
-        # 새 터미널 창 열기
         open_new_terminal(group_script, terminal_app, dry_run=False)
-
-        # 창 생성 간격 (마지막 그룹 제외)
         if i < total:
             time.sleep(0.5)
 
@@ -270,14 +354,83 @@ def run_multi_terminal(accounts, extra_flags, group_size, dry_run=False):
         print(f"[launch] {total}개 터미널 창 생성 완료.")
         sessions = [f"{TMUX_SESSION_PREFIX}_{i}" for i in range(1, total + 1)]
         print(f"         세션 목록: {', '.join(sessions)}")
-        print(f"         재접속:    tmux attach-session -t {TMUX_SESSION_PREFIX}_1")
+        print(f"         재접속:    {TMUX_BIN} attach-session -t {TMUX_SESSION_PREFIX}_1")
 
 
-# ─── tmux 없을 때 fallback ───────────────────────────────────────────────────
+# ─── 실행 모드 2: no-tmux (iTerm2 네이티브 split) ────────────────────────────
 
-def run_without_tmux(accounts, extra_flags):
-    """tmux 미설치 시 각 계정을 백그라운드 subprocess + 로그 파일로 실행."""
-    print(f"[launch] tmux 없음 — {len(accounts)}개 계정을 백그라운드로 실행합니다.")
+def run_without_tmux(accounts, extra_flags, group_size, dry_run=False):
+    """--no-tmux: iTerm2 네이티브 split pane / Terminal.app 탭으로 분할 창 생성.
+
+    tmux 없이 터미널 앱의 네이티브 분할 기능을 사용한다.
+      iTerm2      → AppleScript split pane (tmux와 동일한 2×2 레이아웃)
+      Terminal.app → 같은 창에 탭으로 추가 (AppleScript split 미지원)
+      둘 다 없음   → run_background_fallback() 으로 자동 전환
+    """
+    groups = chunk_accounts(accounts, group_size)
+    terminal_app = detect_terminal_app()
+    total = len(groups)
+
+    if terminal_app == "iterm2":
+        mode_label = "iTerm2 네이티브 split pane"
+    else:
+        mode_label = "Terminal.app 탭"
+
+    print(f"[launch] {len(accounts)}개 계정 → {total}개 터미널 창 "
+          f"(창당 최대 {group_size}개 pane)")
+    print(f"[launch] 모드: no-tmux ({mode_label})")
+    print()
+
+    if terminal_app not in ("iterm2", "terminal"):
+        print("[INFO] 지원되는 터미널 앱 없음 → 백그라운드 subprocess로 전환")
+        run_background_fallback(accounts, extra_flags)
+        return
+
+    for i, group in enumerate(groups, 1):
+        user_ids = [a["user_id"] for a in group]
+        print(f"  ── 그룹 {i}/{total}  계정={', '.join(user_ids)}")
+
+        acct_paths = create_acct_scripts(group, extra_flags)
+
+        if terminal_app == "iterm2":
+            applescript = build_iterm2_split_applescript(acct_paths)
+            label = f"iTerm2 split (그룹 {i})"
+        else:
+            applescript = build_terminal_tabs_applescript(acct_paths)
+            label = f"Terminal.app 탭 (그룹 {i})"
+
+        if dry_run:
+            separator = "     " + "─" * 50
+            print()
+            print(separator)
+            for line in applescript.splitlines():
+                print(f"     {line}")
+            print(separator)
+            print()
+            continue
+
+        run_osascript(applescript, dry_run=False, label=label)
+        if i < total:
+            time.sleep(0.5)
+
+    if not dry_run:
+        print()
+        if terminal_app == "iterm2":
+            print(f"[launch] {total}개 iTerm2 창 생성 완료 (네이티브 split pane)")
+            print("         Ctrl+D 또는 창 닫기로 종료")
+        else:
+            print(f"[launch] {total}개 Terminal.app 창 생성 완료 (탭)")
+
+
+# ─── 실행 모드 3: background (subprocess + 로그) ─────────────────────────────
+
+def run_background_fallback(accounts, extra_flags):
+    """--background: 각 계정을 백그라운드 subprocess + 로그 파일로 실행.
+
+    터미널 창 없이 조용히 실행하고 싶을 때 사용한다.
+    로그 파일: account_{N}.log
+    """
+    print(f"[launch] {len(accounts)}개 계정을 백그라운드로 실행합니다.")
     procs = []
     for a in accounts:
         cmd = [sys.executable, str(MAIN_PY), "--account", str(a["num"])] + extra_flags
@@ -288,12 +441,11 @@ def run_without_tmux(accounts, extra_flags):
         print(f"  계정 {a['num']:2d} ({a['user_id']}): PID {proc.pid} → {log_path.name}")
 
     print()
-    print("[launch] 모든 프로세스 시작 완료. 종료를 기다립니다...")
-    print("         Ctrl+C 로 전체 종료.")
+    print("[launch] 모든 프로세스 시작 완료. Ctrl+C 로 전체 종료.")
     print()
 
     try:
-        for a, proc, log_path in procs:
+        for a, proc, _ in procs:
             ret = proc.wait()
             status = "성공" if ret == 0 else f"실패(코드 {ret})"
             print(f"  계정 {a['num']:2d} ({a['user_id']}): {status}")
@@ -307,17 +459,18 @@ def run_without_tmux(accounts, extra_flags):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="다중 계정 tmux 런처",
+        description="다중 계정 런처 — tmux 또는 iTerm2 네이티브 split pane",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+실행 모드:
+  (없음)        tmux 세션 + 새 터미널 창  [기본]
+  --no-tmux     iTerm2 네이티브 split pane (tmux 없이 동일한 분할 화면)
+  --background  백그라운드 subprocess + 로그 파일 (터미널 창 없음)
+
 .env 설정 예시:
   TENNIS_ACCOUNT_1_ID=user1
   TENNIS_ACCOUNT_1_PW=pass1
   TENNIS_ACCOUNT_1_RESERVATION_1=2026-06-07:10:1
-
-  TENNIS_ACCOUNT_2_ID=user2
-  TENNIS_ACCOUNT_2_PW=pass2
-  TENNIS_ACCOUNT_2_RESERVATION_1=2026-06-14:08:3
         """,
     )
     parser.add_argument("--test", action="store_true",
@@ -325,9 +478,11 @@ def main():
     parser.add_argument("--check", action="store_true",
                         help="로그인 테스트만 실행")
     parser.add_argument("--dry-run", action="store_true",
-                        help="생성될 스크립트 내용 출력 (터미널 창 미생성)")
+                        help="생성될 스크립트/AppleScript 내용 출력 (창 미생성)")
     parser.add_argument("--no-tmux", action="store_true",
-                        help="tmux 없이 백그라운드 subprocess로 실행")
+                        help="iTerm2 네이티브 split pane으로 실행 (tmux 없이)")
+    parser.add_argument("--background", action="store_true",
+                        help="백그라운드 subprocess + 로그 파일로 실행")
     parser.add_argument("--group-size", type=int, default=GROUP_SIZE,
                         metavar="N",
                         help=f"터미널 창당 최대 계정(pane) 수 (기본값: {GROUP_SIZE})")
@@ -366,18 +521,31 @@ def main():
         print("  모드: 실제 예약")
     print()
 
-    use_tmux = not args.no_tmux and tmux_available()
+    # 실행 모드 결정
+    # 우선순위: --background > --no-tmux > tmux 사용 가능 여부
+    if args.background:
+        if args.dry_run:
+            print("[dry-run] 실행될 명령:")
+            for a in accounts:
+                flags = " ".join(extra_flags)
+                print(f"  python3 {MAIN_PY} --account {a['num']} {flags}")
+        else:
+            run_background_fallback(accounts, extra_flags)
 
-    if args.dry_run:
+    elif args.no_tmux:
+        run_without_tmux(accounts, extra_flags,
+                         group_size=args.group_size, dry_run=args.dry_run)
+
+    elif tmux_available():
         run_multi_terminal(accounts, extra_flags,
-                           group_size=args.group_size, dry_run=True)
-    elif use_tmux:
-        run_multi_terminal(accounts, extra_flags,
-                           group_size=args.group_size, dry_run=False)
+                           group_size=args.group_size, dry_run=args.dry_run)
+
     else:
-        if not args.no_tmux:
-            print("[INFO] tmux를 찾을 수 없어 백그라운드 모드로 실행합니다.")
-        run_without_tmux(accounts, extra_flags)
+        print("[INFO] tmux를 찾을 수 없습니다.")
+        print("[INFO] --no-tmux 또는 --background 옵션을 사용하세요.")
+        print()
+        run_without_tmux(accounts, extra_flags,
+                         group_size=args.group_size, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
