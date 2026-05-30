@@ -4,14 +4,22 @@
 다중 계정 tmux 런처
 
 .env에 TENNIS_ACCOUNT_N_* 형식으로 계정을 정의하면
-각 계정마다 독립 프로세스를 tmux pane/window에서 실행한다.
+GROUP_SIZE(기본 4)개씩 묶어 그룹마다 새 터미널 창을 열고
+그 안에서 tmux 세션을 시작해 pane으로 분할 표시한다.
+
+  계정 13개 예시:
+    그룹 1 (계정 1~4)  → 새 터미널 창 → tmux tennis_1 → 2×2 pane
+    그룹 2 (계정 5~8)  → 새 터미널 창 → tmux tennis_2 → 2×2 pane
+    그룹 3 (계정 9~12) → 새 터미널 창 → tmux tennis_3 → 2×2 pane
+    그룹 4 (계정 13)   → 새 터미널 창 → tmux tennis_4 → 1 pane
 
 사용법:
-    python3 launch.py              # 전체 계정 예약 실행
-    python3 launch.py --test       # 테스트 모드 (대관신청 전 중단)
-    python3 launch.py --check      # 로그인 테스트만
-    python3 launch.py --dry-run    # tmux 명령 출력만 (미실행)
-    python3 launch.py --no-tmux    # tmux 없이 백그라운드 subprocess 실행
+    python3 launch.py                  # 기본 실행 (4개씩 그룹)
+    python3 launch.py --group-size 2   # 터미널 창당 최대 2개
+    python3 launch.py --test           # 테스트 모드 (대관신청 전 중단)
+    python3 launch.py --check          # 로그인 테스트만
+    python3 launch.py --dry-run        # 스크립트 내용 출력 (창 미생성)
+    python3 launch.py --no-tmux        # tmux 없이 백그라운드 subprocess 실행
 """
 
 import argparse
@@ -21,9 +29,11 @@ import sys
 import time
 from pathlib import Path
 
-TMUX_SESSION = "tennis"
+GROUP_SIZE = 4                   # 터미널 창당 최대 pane 수
+TMUX_SESSION_PREFIX = "tennis"   # 세션 이름: tennis_1, tennis_2, ...
 SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_PY = SCRIPT_DIR / "main.py"
+TMP_DIR = Path("/tmp")
 
 
 # ─── 계정 파싱 ────────────────────────────────────────────────────────────────
@@ -54,7 +64,142 @@ def load_accounts():
     return accounts
 
 
-# ─── tmux 유틸 ────────────────────────────────────────────────────────────────
+def chunk_accounts(accounts, size):
+    """계정 목록을 size개씩 그룹으로 나눈다."""
+    return [accounts[i:i + size] for i in range(0, len(accounts), size)]
+
+
+# ─── 터미널 앱 감지 ──────────────────────────────────────────────────────────
+
+def detect_terminal_app():
+    """사용 가능한 터미널 앱을 감지한다.
+
+    감지 순서: 실행 중인 iTerm2 → 설치된 iTerm2 → Terminal.app
+    Returns: 'iterm2' | 'terminal'
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to return '
+             '(name of every process) contains "iTerm2"'],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.stdout.strip() == "true":
+            return "iterm2"
+    except Exception:
+        pass
+
+    if Path("/Applications/iTerm.app").exists():
+        return "iterm2"
+
+    return "terminal"
+
+
+# ─── 스크립트 생성 ────────────────────────────────────────────────────────────
+
+def create_group_scripts(group, session_name, extra_flags, group_idx):
+    """그룹 tmux 스크립트와 계정별 실행 스크립트를 /tmp에 생성한다.
+
+    생성 파일:
+      /tmp/tennis_acct_{N}.sh     — 계정 N 단독 실행 스크립트
+      /tmp/tennis_group_{idx}.sh  — tmux 세션 생성 + pane 분할 + attach
+
+    Returns: Path — 그룹 스크립트 경로
+    """
+    py = sys.executable
+    flags_str = " ".join(extra_flags)
+
+    # ── 계정별 실행 스크립트 ──────────────────────────────────────────
+    acct_paths = []
+    for acct in group:
+        path = TMP_DIR / f"tennis_acct_{acct['num']}.sh"
+        path.write_text(
+            "#!/bin/bash\n"
+            f"{py} {MAIN_PY} --account {acct['num']} {flags_str}\n"
+            "echo ''\n"
+            f"echo '[계정 {acct['num']}] {acct['user_id']} 완료."
+            " 엔터를 누르면 닫힙니다.'\n"
+            "read\n"
+        )
+        path.chmod(0o755)
+        acct_paths.append(path)
+
+    # ── 그룹 tmux 스크립트 ───────────────────────────────────────────
+    n = len(group)
+    user_ids = ", ".join(a["user_id"] for a in group)
+
+    lines = [
+        "#!/bin/bash",
+        f'SESSION="{session_name}"',
+        "",
+        "# 기존 세션이 있으면 제거",
+        'tmux kill-session -t "$SESSION" 2>/dev/null || true',
+        "",
+        f"# 그룹 {group_idx}: {user_ids}",
+        f'tmux new-session -d -s "$SESSION" "{acct_paths[0]}"',
+    ]
+
+    if n >= 2:
+        lines.append(
+            f'tmux split-window -t "$SESSION:0.0" -h "{acct_paths[1]}"'
+        )
+    if n >= 3:
+        lines.append(
+            f'tmux split-window -t "$SESSION:0.0" -v "{acct_paths[2]}"'
+        )
+    if n >= 4:
+        lines.append(
+            f'tmux split-window -t "$SESSION:0.1" -v "{acct_paths[3]}"'
+        )
+
+    if n > 1:
+        lines.append('tmux select-layout -t "$SESSION:0" tiled')
+
+    lines += [
+        'tmux select-pane -t "$SESSION:0.0"',
+        "",
+        "# bash 프로세스를 tmux attach 로 교체 → 터미널 창이 tmux 세션을 직접 표시",
+        'exec tmux attach-session -t "$SESSION"',
+    ]
+
+    group_path = TMP_DIR / f"tennis_group_{group_idx}.sh"
+    group_path.write_text("\n".join(lines) + "\n")
+    group_path.chmod(0o755)
+
+    return group_path
+
+
+# ─── 터미널 창 열기 ──────────────────────────────────────────────────────────
+
+def open_new_terminal(script_path, terminal_app, dry_run=False):
+    """AppleScript로 새 터미널 창을 열고 그룹 스크립트를 실행한다."""
+    path_str = str(script_path)
+
+    if terminal_app == "iterm2":
+        applescript = (
+            'tell application "iTerm2"\n'
+            f'    create window with default profile command "bash {path_str}"\n'
+            'end tell'
+        )
+    else:
+        # Terminal.app: do script 는 새 창에서 실행됨
+        applescript = (
+            'tell application "Terminal"\n'
+            f'    do script "bash {path_str}"\n'
+            '    activate\n'
+            'end tell'
+        )
+
+    if dry_run:
+        indent = "    "
+        formatted = applescript.replace("\n", f"\n{indent}")
+        print(f"  [osascript]\n    {formatted}")
+        return
+
+    subprocess.run(["osascript", "-e", applescript], check=True)
+
+
+# ─── 멀티 터미널 실행 ────────────────────────────────────────────────────────
 
 def tmux_available():
     try:
@@ -64,152 +209,64 @@ def tmux_available():
         return False
 
 
-def tmux_session_exists(session):
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
-        capture_output=True,
-    )
-    return result.returncode == 0
+def run_multi_terminal(accounts, extra_flags, group_size, dry_run=False):
+    """계정을 group_size개씩 묶어 그룹마다 새 터미널 창 + tmux 세션을 생성한다."""
+    groups = chunk_accounts(accounts, group_size)
+    terminal_app = detect_terminal_app()
+    total = len(groups)
 
+    print(f"[launch] {len(accounts)}개 계정 → {total}개 터미널 창 "
+          f"(창당 최대 {group_size}개 pane)")
+    print(f"[launch] 터미널 앱: {terminal_app}")
+    print()
 
-def tmux_kill_session(session):
-    subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+    for i, group in enumerate(groups, 1):
+        session = f"{TMUX_SESSION_PREFIX}_{i}"
+        user_ids = [a["user_id"] for a in group]
 
+        print(f"  ── 그룹 {i}/{total}  세션={session}  "
+              f"계정={', '.join(user_ids)}")
 
-def tmux_run(cmd, dry_run=False):
-    if dry_run:
-        print("  [tmux]", " ".join(str(c) for c in cmd))
-        return
-    subprocess.run(cmd, check=True)
+        # 기존 세션 제거
+        if not dry_run:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", session], capture_output=True
+            )
 
+        # 스크립트 생성
+        group_script = create_group_scripts(group, session, extra_flags, i)
 
-def build_pane_cmd(account_num, extra_flags):
-    """각 pane에서 실행할 셸 명령 문자열."""
-    flags = " ".join(extra_flags)
-    py = sys.executable
-    return (
-        f"{py} {MAIN_PY} --account {account_num} {flags}; "
-        f"echo ''; "
-        f"echo '[계정 {account_num}] 완료. 엔터를 누르면 닫힙니다.'; "
-        f"read"
-    )
+        if dry_run:
+            print(f"     그룹 스크립트: {group_script}")
+            print()
+            separator = "     " + "─" * 50
+            print(separator)
+            for line in group_script.read_text().splitlines():
+                print(f"     {line}")
+            print(separator)
+            open_new_terminal(group_script, terminal_app, dry_run=True)
+            print()
+            continue
 
+        # 새 터미널 창 열기
+        open_new_terminal(group_script, terminal_app, dry_run=False)
 
-# ─── 레이아웃 ─────────────────────────────────────────────────────────────────
-
-def run_with_tmux(accounts, extra_flags, dry_run=False):
-    """tmux 세션을 생성하고 계정별 pane/window를 배치한다.
-
-    1~4개 계정: pane 분할로 한 화면에 모두 표시
-    5개 이상:   window 분리 (account 당 1 window)
-    """
-    cmds = [build_pane_cmd(a["num"], extra_flags) for a in accounts]
-    n = len(accounts)
-
-    print(f"[launch] {n}개 계정 → tmux 세션 '{TMUX_SESSION}' 시작")
-
-    # 기존 세션 처리
-    if tmux_session_exists(TMUX_SESSION):
-        answer = input(f"  이미 '{TMUX_SESSION}' 세션이 있습니다. 종료하고 재시작할까요? [y/N] ").strip().lower()
-        if answer == "y":
-            tmux_kill_session(TMUX_SESSION)
-            if not dry_run:
-                time.sleep(0.3)
-        else:
-            print("[INFO] 기존 세션에 attach합니다.")
-            os.execvp("tmux", ["tmux", "attach-session", "-t", TMUX_SESSION])
-            return
-
-    if n <= 4:
-        _setup_pane_layout(cmds, accounts, dry_run)
-    else:
-        _setup_window_layout(cmds, accounts, dry_run)
+        # 창 생성 간격 (마지막 그룹 제외)
+        if i < total:
+            time.sleep(0.5)
 
     if not dry_run:
-        print(f"[launch] tmux 세션 '{TMUX_SESSION}'에 attach합니다. (Ctrl+B D 로 detach)")
-        time.sleep(0.2)
-        os.execvp("tmux", ["tmux", "attach-session", "-t", TMUX_SESSION])
-
-
-def _setup_pane_layout(cmds, accounts, dry_run):
-    """1~4개 계정을 pane으로 분할해 한 화면에 표시."""
-    n = len(accounts)
-    s = TMUX_SESSION
-
-    # 세션 + 첫 번째 pane
-    tmux_run([
-        "tmux", "new-session", "-d", "-s", s,
-        "-n", f"계정{accounts[0]['num']}",
-        "bash", "-c", cmds[0],
-    ], dry_run)
-
-    if n >= 2:
-        # pane 0을 좌우로 분할 → pane 1 (오른쪽)
-        tmux_run(["tmux", "split-window", "-t", f"{s}:0.0", "-h",
-                  "bash", "-c", cmds[1]], dry_run)
-
-    if n >= 3:
-        # pane 0 (왼쪽 위)를 위아래로 분할 → pane 2 (왼쪽 아래)
-        tmux_run(["tmux", "split-window", "-t", f"{s}:0.0", "-v",
-                  "bash", "-c", cmds[2]], dry_run)
-
-    if n == 4:
-        # pane 1 (오른쪽 위)를 위아래로 분할 → pane 3 (오른쪽 아래)
-        tmux_run(["tmux", "split-window", "-t", f"{s}:0.1", "-v",
-                  "bash", "-c", cmds[3]], dry_run)
-
-    # 크기 균등 정렬
-    if n > 1:
-        tmux_run(["tmux", "select-layout", "-t", f"{s}:0", "tiled"], dry_run)
-
-    # 첫 번째 pane 포커스
-    tmux_run(["tmux", "select-pane", "-t", f"{s}:0.0"], dry_run)
-
-    _print_layout_info(accounts, mode="pane")
-
-
-def _setup_window_layout(cmds, accounts, dry_run):
-    """5개 이상 계정을 window 당 1개로 분리."""
-    s = TMUX_SESSION
-
-    # 첫 번째 window
-    tmux_run([
-        "tmux", "new-session", "-d", "-s", s,
-        "-n", f"계정{accounts[0]['num']}",
-        "bash", "-c", cmds[0],
-    ], dry_run)
-
-    for i, acct in enumerate(accounts[1:], 1):
-        tmux_run([
-            "tmux", "new-window", "-t", s,
-            "-n", f"계정{acct['num']}",
-            "bash", "-c", cmds[i],
-        ], dry_run)
-
-    # 첫 번째 window 포커스
-    tmux_run(["tmux", "select-window", "-t", f"{s}:0"], dry_run)
-
-    _print_layout_info(accounts, mode="window")
-
-
-def _print_layout_info(accounts, mode):
-    print()
-    if mode == "pane":
-        print("  레이아웃: 단일 화면에 pane 분할")
-        print("  단축키:   Ctrl+B → 방향키 (pane 이동)")
-    else:
-        print("  레이아웃: window 분리")
-        print("  단축키:   Ctrl+B N/P (다음/이전 window)")
-    print()
-    for a in accounts:
-        print(f"  계정 {a['num']}: {a['user_id']}")
-    print()
+        print()
+        print(f"[launch] {total}개 터미널 창 생성 완료.")
+        sessions = [f"{TMUX_SESSION_PREFIX}_{i}" for i in range(1, total + 1)]
+        print(f"         세션 목록: {', '.join(sessions)}")
+        print(f"         재접속:    tmux attach-session -t {TMUX_SESSION_PREFIX}_1")
 
 
 # ─── tmux 없을 때 fallback ───────────────────────────────────────────────────
 
 def run_without_tmux(accounts, extra_flags):
-    """tmux 미설치 시 각 계정을 백그라운드 subprocess로 실행."""
+    """tmux 미설치 시 각 계정을 백그라운드 subprocess + 로그 파일로 실행."""
     print(f"[launch] tmux 없음 — {len(accounts)}개 계정을 백그라운드로 실행합니다.")
     procs = []
     for a in accounts:
@@ -218,7 +275,7 @@ def run_without_tmux(accounts, extra_flags):
         with open(log_path, "w") as log_f:
             proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
         procs.append((a, proc, log_path))
-        print(f"  계정 {a['num']} ({a['user_id']}): PID {proc.pid} → {log_path.name}")
+        print(f"  계정 {a['num']:2d} ({a['user_id']}): PID {proc.pid} → {log_path.name}")
 
     print()
     print("[launch] 모든 프로세스 시작 완료. 종료를 기다립니다...")
@@ -229,7 +286,7 @@ def run_without_tmux(accounts, extra_flags):
         for a, proc, log_path in procs:
             ret = proc.wait()
             status = "성공" if ret == 0 else f"실패(코드 {ret})"
-            print(f"  계정 {a['num']} ({a['user_id']}): {status}")
+            print(f"  계정 {a['num']:2d} ({a['user_id']}): {status}")
     except KeyboardInterrupt:
         print("\n[launch] 중단 — 모든 프로세스를 종료합니다.")
         for _, proc, _ in procs:
@@ -258,9 +315,12 @@ def main():
     parser.add_argument("--check", action="store_true",
                         help="로그인 테스트만 실행")
     parser.add_argument("--dry-run", action="store_true",
-                        help="tmux 명령 출력만 (실제 실행 안 함)")
+                        help="생성될 스크립트 내용 출력 (터미널 창 미생성)")
     parser.add_argument("--no-tmux", action="store_true",
                         help="tmux 없이 백그라운드 subprocess로 실행")
+    parser.add_argument("--group-size", type=int, default=GROUP_SIZE,
+                        metavar="N",
+                        help=f"터미널 창당 최대 계정(pane) 수 (기본값: {GROUP_SIZE})")
     args = parser.parse_args()
 
     load_env_file()
@@ -282,10 +342,9 @@ def main():
     print("=" * 60)
     print(f"  계정 수: {len(accounts)}개")
     for a in accounts:
-        print(f"  [{a['num']}] {a['user_id']}")
+        print(f"  [{a['num']:2d}] {a['user_id']}")
     print()
 
-    # main.py에 넘길 추가 플래그
     extra_flags = []
     if args.test:
         extra_flags.append("--test")
@@ -300,10 +359,11 @@ def main():
     use_tmux = not args.no_tmux and tmux_available()
 
     if args.dry_run:
-        print("[dry-run] 실행될 tmux 명령:")
-        run_with_tmux(accounts, extra_flags, dry_run=True)
+        run_multi_terminal(accounts, extra_flags,
+                           group_size=args.group_size, dry_run=True)
     elif use_tmux:
-        run_with_tmux(accounts, extra_flags, dry_run=False)
+        run_multi_terminal(accounts, extra_flags,
+                           group_size=args.group_size, dry_run=False)
     else:
         if not args.no_tmux:
             print("[INFO] tmux를 찾을 수 없어 백그라운드 모드로 실행합니다.")
