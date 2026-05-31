@@ -76,21 +76,40 @@ def update_env_reservations(account_num, slots):
 
 # ─── HTTP API 서버 ────────────────────────────────────────────────────────────
 
+# HTML을 HTTP로 서빙하기 위해 모듈 레벨에 보관
+# (file:// 프로토콜에서 fetch → CORS null-origin 차단 우회)
+_HTML_CONTENT: str = ""
+
+
 class _APIHandler(BaseHTTPRequestHandler):
-    """브라우저 → Python .env 업데이트를 처리하는 로컬 HTTP 핸들러."""
+    """브라우저 → Python .env 업데이트를 처리하는 로컬 HTTP 핸들러.
+
+    GET /          → HTML 페이지 서빙 (same-origin으로 CORS 완전 해소)
+    POST /api/save-slots → .env 예약 라인 교체
+    """
 
     def log_message(self, *_):
         pass  # 콘솔 로그 억제
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
         self.send_response(200)
         self._cors()
         self.end_headers()
+
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            content = _HTML_CONTENT.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", len(content))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(content)
 
     def do_POST(self):
         if self.path == "/api/save-slots":
@@ -360,12 +379,23 @@ function slotMap() {
   const m = {};
   const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
   ACCOUNTS.forEach(a => {
-    if (!selected.has(a.num)) return;  // 선택된 계정만 포함
-    a.reservations.forEach(r => {
+    if (!selected.has(a.num)) return;
+
+    // 포커스 계정: 사용자가 편집 중인 checkedSlots 기준
+    // (체크 추가 → 달력에 색상+번호 표시 / 체크 해제 → 달력에서 제거)
+    // 다른 계정: 기존 reservations 기준
+    const resList = (a.num === focusedAcct)
+      ? [...checkedSlots]
+          .filter(k => k.split(':')[0].startsWith(pfx))
+          .map(k => { const [d,h,c] = k.split(':'); return {date:d, hour:+h, court:+c}; })
+      : a.reservations;
+
+    resList.forEach(r => {
       if (!r.date.startsWith(pfx)) return;
       const day = +r.date.split('-')[2];
       ((m[day] ??= {})[r.hour] ??= {})[r.court] ??= [];
-      m[day][r.hour][r.court].push(a.num);
+      if (!m[day][r.hour][r.court].includes(a.num))
+        m[day][r.hour][r.court].push(a.num);
     });
   });
   return m;
@@ -689,18 +719,22 @@ def main():
     else:
         init_year, init_month = get_initial_month(accounts)
 
+    global _HTML_CONTENT
     _, api_port = start_api_server()
     html = build_html(accounts, init_year, init_month, api_port)
 
-    out = Path("/tmp/tennis_viewer.html")
-    out.write_text(html, encoding="utf-8")
+    # HTTP 서버에서 same-origin으로 서빙 → fetch CORS 차단 없음
+    _HTML_CONTENT = html
+
+    # fallback: file로도 저장
+    Path("/tmp/tennis_viewer.html").write_text(html, encoding="utf-8")
 
     total_res = sum(len(a["reservations"]) for a in accounts)
     print(f"[viewer] 계정 {len(accounts)}개 / 예약 총 {total_res}건")
     print(f"[viewer] 초기 표시: {init_year}년 {init_month}월")
-    print(f"[viewer] API 서버: http://127.0.0.1:{api_port}")
+    print(f"[viewer] 주소: http://127.0.0.1:{api_port}")
     print(f"[viewer] 브라우저 실행 중... (종료: Ctrl+C)")
-    webbrowser.open(f"file://{out}")
+    webbrowser.open(f"http://127.0.0.1:{api_port}/")
 
     try:
         threading.Event().wait()   # 브라우저가 열린 채로 서버 유지
