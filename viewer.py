@@ -116,7 +116,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .dow-hd{text-align:center;font-size:11px;font-weight:600;color:#64748b;padding:5px 0}
 .dow-hd.sat{color:#2563eb}.dow-hd.sun{color:#dc2626}
 
-.day-cell{background:#fff;border:1px solid #e2e8f0;border-radius:8px;min-height:34px;overflow:hidden;transition:box-shadow .15s}
+.day-cell{background:#fff;border:1px solid #e2e8f0;border-radius:8px;min-height:unset;overflow:hidden;transition:box-shadow .15s}
 .day-cell:hover{box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .day-cell.blank{background:#f8fafc;border-color:#f1f5f9}
 .day-cell.is-today{border:2px solid #3b82f6}
@@ -132,12 +132,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .t-label{font-size:8px;color:#94a3b8;font-weight:500;text-align:right;padding-right:2px;line-height:1;display:flex;align-items:center;justify-content:flex-end}
 
 /* 슬롯 */
-.slot{height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;cursor:pointer;position:relative;transition:opacity .2s,transform .1s;user-select:none}
+.slot{height:15px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;cursor:pointer;position:relative;transition:opacity .2s,transform .1s;user-select:none}
 .slot:hover{transform:scale(1.15);z-index:20}
-.slot.empty{background:#f1f5f9;border:1px dashed #cbd5e1;color:#cbd5e1}
+.slot.empty{background:#f1f5f9;border:1px dashed #cbd5e1;color:#d1d5db}
 .slot.booked{color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.35)}
 .slot.dup{background:#fef3c7!important;border:1.5px solid #f59e0b!important;color:#92400e;flex-direction:column;font-size:7px;gap:0;line-height:1.1}
 .slot.dimmed{opacity:.08!important;pointer-events:none}
+.mini.no-res{opacity:.28}
+.mini.no-res .slot{cursor:default}
+.mini.no-res .slot:hover{transform:none}
 
 /* 툴팁 */
 #tip{position:fixed;background:rgba(15,23,42,.93);color:#fff;padding:7px 11px;border-radius:8px;font-size:12px;line-height:1.65;pointer-events:none;z-index:9999;display:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,.3);max-width:280px}
@@ -244,17 +247,12 @@ function slotMap() {
   return m;
 }
 
-function usedHours() {
-  const s = new Set();
-  ACCOUNTS.forEach(a => a.reservations.forEach(r => s.add(r.hour)));
-  return s.size ? [...s].sort((a,b)=>a-b) : [6,8,10];
-}
-
 /* ── 달력 렌더링 ── */
+const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20, 22];
+
 function buildCalendar() {
   document.getElementById('mtitle').textContent = `${CY}년 ${CM}월`;
   const sm = slotMap();
-  const hours = usedHours();
   const today = new Date();
   const todayD = (today.getFullYear()===CY && today.getMonth()+1===CM) ? today.getDate() : -1;
 
@@ -276,24 +274,23 @@ function buildCalendar() {
     const pad = String(day).padStart(2,'0');
     const dateStr = `${CY}-${String(CM).padStart(2,'0')}-${pad}`;
 
+    const hasRes = !!cells;
     h += `<div class="day-cell${sat?' is-sat':sun?' is-sun':''}${day===todayD?' is-today':''}">`;
     h += `<div class="day-num${sat?' sat-n':sun?' sun-n':''}">${day}<span class="dow-tag">${DOW[dow]}</span></div>`;
 
-    if (cells) {
-      h += `<div class="mini" style="grid-template-columns:${colCss}">`;
-      // 코트 헤더
-      h += '<div></div>'; // 시간 레이블 자리
-      [1,2,3,4].forEach(c => h += `<div class="ct-hd">C${c}</div>`);
-      // 시간 행
-      hours.forEach(hr => {
-        h += `<div class="t-label">${String(hr).padStart(2,'0')}</div>`;
-        [1,2,3,4].forEach(ct => {
-          const accts = cells[hr]?.[ct] || [];
-          h += makeSlot(accts, dateStr, hr, ct);
-        });
+    // 예약 유무와 관계없이 모든 날짜에 미니 그리드 표시
+    // 예약 없는 날: no-res 클래스로 흐리게 처리
+    h += `<div class="mini${hasRes ? '' : ' no-res'}" style="grid-template-columns:${colCss}">`;
+    h += '<div></div>'; // 시간 레이블 자리
+    [1,2,3,4].forEach(c => h += `<div class="ct-hd">C${c}</div>`);
+    ALL_HOURS.forEach(hr => {
+      h += `<div class="t-label">${String(hr).padStart(2,'0')}</div>`;
+      [1,2,3,4].forEach(ct => {
+        const accts = cells?.[hr]?.[ct] || [];  // cells 없어도 안전
+        h += makeSlot(accts, dateStr, hr, ct);
       });
-      h += '</div>';
-    }
+    });
+    h += '</div>';
     h += '</div>';
   }
 
