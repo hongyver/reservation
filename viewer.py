@@ -499,22 +499,15 @@ function refreshFocus() {
 /* ── 슬롯 체크 ── */
 function clickSlot(el, dateStr, hr, ct) {
   const key = `${dateStr}:${hr}:${ct}`;
-  if (checkedSlots.has(key)) {
-    checkedSlots.delete(key);
-    el.classList.remove('ckd');
-  } else {
-    checkedSlots.add(key);
-    el.classList.add('ckd');
-  }
-  renderCheckedPanel();
+  checkedSlots.has(key) ? checkedSlots.delete(key) : checkedSlots.add(key);
+  // buildCalendar: slotMap 재계산 → 포커스 계정 색상+번호 반영
+  //               ckd 복원 + refreshFocus + renderCheckedPanel 통합 처리
+  buildCalendar();
 }
 
 function uncheckSlot(key) {
   checkedSlots.delete(key);
-  const [d, h, c] = key.split(':');
-  document.querySelectorAll(`.slot[data-d="${d}"][data-h="${h}"][data-c="${c}"]`)
-    .forEach(el => el.classList.remove('ckd'));
-  renderCheckedPanel();
+  buildCalendar();
 }
 
 function buildEnvPreview(acct, sortedKeys) {
