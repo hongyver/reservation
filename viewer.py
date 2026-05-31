@@ -203,7 +203,7 @@ function toggleAcct(num) {
   selected.has(num) ? selected.delete(num) : selected.add(num);
   const card = document.getElementById('ac'+num);
   if (card) { card.classList.toggle('on', selected.has(num)); card.classList.toggle('off', !selected.has(num)); }
-  document.querySelectorAll('.slot[data-a]').forEach(refreshDim);
+  buildCalendar();  // 선택 상태 변경 시 슬롯 맵 재계산 → 중복 판정 갱신
 }
 
 function selectAll(v) {
@@ -214,7 +214,7 @@ function selectAll(v) {
     const cb = card && card.querySelector('.acct-cb');
     if (cb) cb.checked = v;
   });
-  document.querySelectorAll('.slot[data-a]').forEach(refreshDim);
+  buildCalendar();  // 선택 상태 변경 시 슬롯 맵 재계산 → 중복 판정 갱신
 }
 
 function refreshDim(el) {
@@ -239,12 +239,15 @@ function changeMonth(d) {
 function slotMap() {
   const m = {};
   const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
-  ACCOUNTS.forEach(a => a.reservations.forEach(r => {
-    if (!r.date.startsWith(pfx)) return;
-    const day = +r.date.split('-')[2];
-    ((m[day] ??= {})[r.hour] ??= {})[r.court] ??= [];
-    m[day][r.hour][r.court].push(a.num);
-  }));
+  ACCOUNTS.forEach(a => {
+    if (!selected.has(a.num)) return;  // 선택된 계정만 포함
+    a.reservations.forEach(r => {
+      if (!r.date.startsWith(pfx)) return;
+      const day = +r.date.split('-')[2];
+      ((m[day] ??= {})[r.hour] ??= {})[r.court] ??= [];
+      m[day][r.hour][r.court].push(a.num);
+    });
+  });
   return m;
 }
 
