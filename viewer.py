@@ -436,13 +436,24 @@ function buildCalendar() {
 
 /* ── 포커스(반전) ── */
 function focusAcct(num) {
-  focusedAcct = (focusedAcct === num) ? null : num;
+  if (focusedAcct === num) {
+    // 같은 카드 재클릭 → 포커스 해제 + 체크 초기화
+    focusedAcct = null;
+    checkedSlots = new Set();
+  } else {
+    // 새 계정 선택 → 해당 계정의 현재 예약을 checkedSlots에 로드
+    focusedAcct = num;
+    const acct = ACCOUNTS.find(a => a.num === num);
+    checkedSlots = new Set(
+      (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
+    );
+  }
   ACCOUNTS.forEach(a => {
     const card = document.getElementById('ac'+a.num);
     if (card) card.classList.toggle('fc', focusedAcct === a.num);
   });
-  refreshFocus();
-  renderCheckedPanel();
+  // buildCalendar 내부에서 ckd 복원 + refreshFocus + renderCheckedPanel 모두 처리
+  buildCalendar();
 }
 
 function refreshFocus() {
