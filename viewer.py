@@ -15,7 +15,9 @@
 
 import json
 import sys
+import threading
 import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -27,6 +29,94 @@ ACCOUNT_COLORS = [
 ]
 
 ALL_COURTS = [1, 2, 3, 4]
+
+
+# ─── .env 업데이트 ───────────────────────────────────────────────────────────
+
+def update_env_reservations(account_num, slots):
+    """.env에서 해당 계정의 RESERVATION_* 라인을 체크된 슬롯으로 교체한다.
+
+    - 저장 전 .env.bak 자동 백업
+    - 삽입 위치: TENNIS_ACCOUNT_N_PW= 라인 바로 아래
+    - 정렬: 날짜(오름차순) → 시간(오름차순) → 코트(오름차순)
+
+    Returns: (ok: bool, detail: int|str)
+    """
+    env_path = SCRIPT_DIR / ".env"
+    if not env_path.exists():
+        return False, ".env 파일 없음"
+
+    original = env_path.read_text(encoding="utf-8")
+    env_path.with_suffix(".bak").write_text(original, encoding="utf-8")
+
+    prefix  = f"TENNIS_ACCOUNT_{account_num}_RESERVATION_"
+    pw_key  = f"TENNIS_ACCOUNT_{account_num}_PW="
+
+    lines = original.splitlines(keepends=True)
+    lines = [l for l in lines if not l.strip().startswith(prefix)]
+
+    insert_idx = next(
+        (i + 1 for i, l in enumerate(lines) if l.strip().startswith(pw_key)),
+        None,
+    )
+    if insert_idx is None:
+        return False, f"계정 {account_num} PW 라인 미발견"
+
+    sorted_slots = sorted(slots, key=lambda s: (s["date"], s["hour"], s["court"]))
+    new_lines = [
+        f"TENNIS_ACCOUNT_{account_num}_RESERVATION_{i+1}="
+        f"{s['date']}:{s['hour']}:{s['court']}\n"
+        for i, s in enumerate(sorted_slots)
+    ]
+    lines[insert_idx:insert_idx] = new_lines
+
+    env_path.write_text("".join(lines), encoding="utf-8")
+    return True, len(sorted_slots)
+
+
+# ─── HTTP API 서버 ────────────────────────────────────────────────────────────
+
+class _APIHandler(BaseHTTPRequestHandler):
+    """브라우저 → Python .env 업데이트를 처리하는 로컬 HTTP 핸들러."""
+
+    def log_message(self, *_):
+        pass  # 콘솔 로그 억제
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/save-slots":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            ok, detail = update_env_reservations(body["account_num"], body["slots"])
+            payload = json.dumps({"ok": ok, "detail": detail}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(payload))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(payload)
+
+
+def start_api_server():
+    """사용 가능한 포트를 찾아 백그라운드 HTTP API 서버를 시작한다."""
+    for port in range(8765, 8800):
+        try:
+            server = HTTPServer(("127.0.0.1", port), _APIHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            return server, port
+        except OSError:
+            continue
+    raise RuntimeError("사용 가능한 포트 없음 (8765-8799)")
 
 
 # ─── 데이터 로드 ──────────────────────────────────────────────────────────────
@@ -171,6 +261,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .ck-tag{background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:2px 8px;font-size:11px;color:#166534;cursor:pointer;transition:background .1s}
 .ck-tag:hover{background:#dcfce7}
 .ck-none{font-size:11px;color:#cbd5e1}
+/* ── .env 저장 UI ── */
+.env-preview{background:#0f172a;color:#86efac;font-family:monospace;font-size:10px;padding:8px 10px;border-radius:6px;white-space:pre;overflow-x:auto;margin:6px 0;line-height:1.65;border:1px solid #1e3a2f}
+.ck-btns{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.save-btn{padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;background:#3b82f6;color:#fff;transition:background .15s}
+.save-btn:hover:not(:disabled){background:#2563eb}
+.save-btn:disabled{background:#94a3b8;cursor:default}
+.copy-btn{padding:5px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;background:#f8fafc;color:#475569;transition:background .15s}
+.copy-btn:hover:not(:disabled){background:#e2e8f0}
+.copy-btn:disabled{opacity:.45;cursor:default}
+.save-ok{color:#22c55e;font-size:11px;font-weight:600}
+.save-err{color:#ef4444;font-size:11px;font-weight:600}
 """
 
 _JS = r"""
@@ -375,20 +476,45 @@ function uncheckSlot(key) {
   renderCheckedPanel();
 }
 
+function buildEnvPreview(acct, sortedKeys) {
+  return sortedKeys.map((k, i) =>
+    `TENNIS_ACCOUNT_${acct.num}_RESERVATION_${i+1}=${k}`
+  ).join('\n');
+}
+
 function renderCheckedPanel() {
   const panel = document.getElementById('ck-panel');
   if (!panel) return;
-  const acctName = focusedAcct !== null
-    ? ' — ' + (ACCOUNTS.find(a => a.num === focusedAcct)?.user_id || '')
-    : '';
+  const acct   = focusedAcct !== null ? ACCOUNTS.find(a => a.num === focusedAcct) : null;
   const sorted = [...checkedSlots].sort();
-  const inner = sorted.length === 0
+  const hasData = acct && sorted.length > 0;
+  const dis = hasData ? '' : 'disabled';
+
+  const tags = sorted.length === 0
     ? '<span class="ck-none">슬롯을 클릭해 선택하세요</span>'
     : sorted.map(k => {
         const [d, h, c] = k.split(':');
-        return `<span class="ck-tag" onclick="uncheckSlot('${k}')">${d} ${String(+h).padStart(2,'0')}:00 C${c} ×</span>`;
+        return `<span class="ck-tag" onclick="uncheckSlot('${k}')">`+
+               `${d} ${String(+h).padStart(2,'0')}:00 C${c} ×</span>`;
       }).join('');
-  panel.innerHTML = `<h3>선택 슬롯${acctName}</h3><div class="ck-tags">${inner}</div>`;
+
+  const preview = hasData
+    ? `<div class="env-preview">${buildEnvPreview(acct, sorted)}</div>`
+    : '';
+
+  const title = acct
+    ? `선택 슬롯 — ${acct.user_id} (계정 ${acct.num})  ${sorted.length}건`
+    : '선택 슬롯';
+
+  panel.innerHTML =
+    `<h3>${title}</h3>` +
+    `<div class="ck-tags">${tags}</div>` +
+    preview +
+    `<div class="ck-btns">` +
+      `<button id="save-btn" class="save-btn" onclick="saveToEnv()" ${dis}>💾 .env 저장</button>` +
+      `<button class="copy-btn" onclick="copyEnvToClipboard()" ${dis}>📋 복사</button>` +
+      `<span id="save-msg"></span>` +
+    `</div>`;
 }
 
 function makeSlot(accts, dateStr, hr, ct) {
@@ -409,6 +535,53 @@ function makeSlot(accts, dateStr, hr, ct) {
   const tip = encodeURIComponent(`⚠ 중복 ${accts.length}건\n${lines.join('\n')}\n${dateStr} ${timeStr} 코트${ct}`);
   const [n1, n2] = accts;
   return `<div class="slot dup" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}><span>${n1}</span><span>⚠${n2}</span></div>`;
+}
+
+/* ── .env 저장 / 복사 ── */
+async function saveToEnv() {
+  if (!focusedAcct)       { alert('계정을 먼저 클릭해 선택하세요.'); return; }
+  if (!checkedSlots.size) { alert('체크된 슬롯이 없습니다.'); return; }
+
+  const btn = document.getElementById('save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '저장 중...'; }
+
+  const slots = [...checkedSlots].sort().map(k => {
+    const [date, hour, court] = k.split(':');
+    return { date, hour: +hour, court: +court };
+  });
+
+  try {
+    const resp = await fetch(`http://127.0.0.1:${API_PORT}/api/save-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_num: focusedAcct, slots }),
+    });
+    const { ok, detail } = await resp.json();
+    showSaveMsg(ok,
+      ok ? `✓ ${detail}건 저장 완료 (.env.bak 백업됨)` : `✗ 저장 실패: ${detail}`
+    );
+  } catch (e) {
+    showSaveMsg(false, `✗ 연결 오류 (API 서버 확인): ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '💾 .env 저장'; }
+  }
+}
+
+function copyEnvToClipboard() {
+  if (!focusedAcct || !checkedSlots.size) return;
+  const acct   = ACCOUNTS.find(a => a.num === focusedAcct);
+  const sorted = [...checkedSlots].sort();
+  navigator.clipboard.writeText(buildEnvPreview(acct, sorted))
+    .then(() => showSaveMsg(true,  '✓ 클립보드에 복사됨'))
+    .catch(e  => showSaveMsg(false, `✗ 복사 실패: ${e.message}`));
+}
+
+function showSaveMsg(ok, msg) {
+  const el = document.getElementById('save-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = ok ? 'save-ok' : 'save-err';
+  setTimeout(() => { if (el) el.textContent = ''; }, 5000);
 }
 
 /* ── 툴팁 ── */
@@ -436,7 +609,7 @@ function bindTips() {
 """
 
 
-def build_html(accounts, init_year, init_month):
+def build_html(accounts, init_year, init_month, api_port=8765):
     data_json = json.dumps(accounts, ensure_ascii=False)
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -480,6 +653,7 @@ def build_html(accounts, init_year, init_month):
 <div id="tip"></div>
 <script>
 const ACCOUNTS = {data_json};
+const API_PORT = {api_port};
 {_JS}
 </script>
 </body>
@@ -504,7 +678,8 @@ def main():
     else:
         init_year, init_month = get_initial_month(accounts)
 
-    html = build_html(accounts, init_year, init_month)
+    _, api_port = start_api_server()
+    html = build_html(accounts, init_year, init_month, api_port)
 
     out = Path("/tmp/tennis_viewer.html")
     out.write_text(html, encoding="utf-8")
@@ -512,9 +687,14 @@ def main():
     total_res = sum(len(a["reservations"]) for a in accounts)
     print(f"[viewer] 계정 {len(accounts)}개 / 예약 총 {total_res}건")
     print(f"[viewer] 초기 표시: {init_year}년 {init_month}월")
-    print(f"[viewer] 파일: {out}")
-    print(f"[viewer] 브라우저 실행 중...")
+    print(f"[viewer] API 서버: http://127.0.0.1:{api_port}")
+    print(f"[viewer] 브라우저 실행 중... (종료: Ctrl+C)")
     webbrowser.open(f"file://{out}")
+
+    try:
+        threading.Event().wait()   # 브라우저가 열린 채로 서버 유지
+    except KeyboardInterrupt:
+        print("\n[viewer] 종료합니다.")
 
 
 if __name__ == "__main__":
