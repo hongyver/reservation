@@ -161,6 +161,7 @@ _JS = r"""
 /* ── 상태 ── */
 let selected = new Set(ACCOUNTS.map(a => a.num));
 let CY, CM;
+const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20, 22];
 
 /* ── 초기화 ── */
 (function init() {
@@ -248,8 +249,6 @@ function slotMap() {
 }
 
 /* ── 달력 렌더링 ── */
-const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20, 22];
-
 function buildCalendar() {
   document.getElementById('mtitle').textContent = `${CY}년 ${CM}월`;
   const sm = slotMap();
