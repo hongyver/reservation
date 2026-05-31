@@ -155,6 +155,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .leg-empty{background:#f1f5f9;border:1px dashed #cbd5e1}
 .leg-booked{background:#3b82f6}
 .leg-dup{background:#fef3c7;border:1.5px solid #f59e0b}
+/* ── 포커스 반전 ── */
+.acct-card.fc{background:var(--c)!important;border-color:var(--c)!important}
+.acct-card.fc .acct-id,.acct-card.fc .acct-num,.acct-card.fc .acct-r3{color:#fff!important}
+.acct-card.fc .pw-box{background:rgba(255,255,255,.2);color:#fff}
+.slot.hi{outline:2px solid rgba(255,255,255,.9);z-index:5;filter:brightness(1.12)}
+.slot.dfm{opacity:.07!important;pointer-events:none}
+/* ── 슬롯 체크 ── */
+.slot.ckd{box-shadow:0 0 0 2px #22c55e!important;z-index:6}
+.slot.ckd::after{content:'✓';position:absolute;top:-6px;right:-4px;font-size:9px;color:#22c55e;font-weight:900;background:#fff;border-radius:50%;line-height:1;padding:0 1px;z-index:7}
+/* ── 체크 패널 ── */
+.ck-panel{margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #e2e8f0;border-radius:8px}
+.ck-panel h3{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+.ck-tags{display:flex;flex-wrap:wrap;gap:4px;min-height:22px}
+.ck-tag{background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:2px 8px;font-size:11px;color:#166534;cursor:pointer;transition:background .1s}
+.ck-tag:hover{background:#dcfce7}
+.ck-none{font-size:11px;color:#cbd5e1}
 """
 
 _JS = r"""
@@ -162,6 +178,8 @@ _JS = r"""
 let selected = new Set(ACCOUNTS.map(a => a.num));
 let CY, CM;
 const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20, 22];
+let focusedAcct = null;   // 포커스(반전)된 계정 번호
+let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
 
 /* ── 초기화 ── */
 (function init() {
@@ -183,7 +201,8 @@ function buildSidebar() {
     ACCOUNTS.map(a => {
       const on = selected.has(a.num);
       return `
-<div class="acct-card ${on?'on':'off'}" style="--c:${a.color}" id="ac${a.num}">
+<div class="acct-card ${on?'on':'off'}" style="--c:${a.color}" id="ac${a.num}"
+     onclick="if(!event.target.closest('input,button'))focusAcct(${a.num})">
   <div class="acct-r1">
     <input type="checkbox" class="acct-cb" ${on?'checked':''} onchange="toggleAcct(${a.num})" style="accent-color:${a.color}">
     <span class="acct-dot"></span>
@@ -304,26 +323,92 @@ function buildCalendar() {
   h += '</div>';
   document.getElementById('cal').innerHTML = h;
   bindTips();
-  document.querySelectorAll('.slot[data-a]').forEach(refreshDim);
+  // 체크된 슬롯 클래스 복원 (달력 재렌더링 후)
+  checkedSlots.forEach(key => {
+    const [d, h2, c] = key.split(':');
+    document.querySelectorAll(`.slot[data-d="${d}"][data-h="${h2}"][data-c="${c}"]`)
+      .forEach(el => el.classList.add('ckd'));
+  });
+  refreshFocus();
+  renderCheckedPanel();
+}
+
+/* ── 포커스(반전) ── */
+function focusAcct(num) {
+  focusedAcct = (focusedAcct === num) ? null : num;
+  ACCOUNTS.forEach(a => {
+    const card = document.getElementById('ac'+a.num);
+    if (card) card.classList.toggle('fc', focusedAcct === a.num);
+  });
+  refreshFocus();
+  renderCheckedPanel();
+}
+
+function refreshFocus() {
+  document.querySelectorAll('.slot[data-a]').forEach(el => {
+    const accts = JSON.parse(el.dataset.a);
+    el.classList.remove('hi', 'dfm');
+    if (focusedAcct === null) return;
+    if (accts.includes(focusedAcct)) el.classList.add('hi');
+    else if (accts.length > 0)       el.classList.add('dfm');
+  });
+}
+
+/* ── 슬롯 체크 ── */
+function clickSlot(el, dateStr, hr, ct) {
+  const key = `${dateStr}:${hr}:${ct}`;
+  if (checkedSlots.has(key)) {
+    checkedSlots.delete(key);
+    el.classList.remove('ckd');
+  } else {
+    checkedSlots.add(key);
+    el.classList.add('ckd');
+  }
+  renderCheckedPanel();
+}
+
+function uncheckSlot(key) {
+  checkedSlots.delete(key);
+  const [d, h, c] = key.split(':');
+  document.querySelectorAll(`.slot[data-d="${d}"][data-h="${h}"][data-c="${c}"]`)
+    .forEach(el => el.classList.remove('ckd'));
+  renderCheckedPanel();
+}
+
+function renderCheckedPanel() {
+  const panel = document.getElementById('ck-panel');
+  if (!panel) return;
+  const acctName = focusedAcct !== null
+    ? ' — ' + (ACCOUNTS.find(a => a.num === focusedAcct)?.user_id || '')
+    : '';
+  const sorted = [...checkedSlots].sort();
+  const inner = sorted.length === 0
+    ? '<span class="ck-none">슬롯을 클릭해 선택하세요</span>'
+    : sorted.map(k => {
+        const [d, h, c] = k.split(':');
+        return `<span class="ck-tag" onclick="uncheckSlot('${k}')">${d} ${String(+h).padStart(2,'0')}:00 C${c} ×</span>`;
+      }).join('');
+  panel.innerHTML = `<h3>선택 슬롯${acctName}</h3><div class="ck-tags">${inner}</div>`;
 }
 
 function makeSlot(accts, dateStr, hr, ct) {
   const ad = JSON.stringify(accts).replace(/'/g, '&#39;');
   const timeStr = `${String(hr).padStart(2,'0')}:00`;
+  const oc = `onclick="clickSlot(this,'${dateStr}',${hr},${ct})"`;
 
   if (!accts.length) {
-    return `<div class="slot empty" data-a="[]" data-d="${dateStr}" data-h="${hr}" data-c="${ct}">□</div>`;
+    return `<div class="slot empty" data-a="[]" data-d="${dateStr}" data-h="${hr}" data-c="${ct}" ${oc}>□</div>`;
   }
   if (accts.length === 1) {
     const a = ACCOUNTS.find(x => x.num === accts[0]);
     const tip = encodeURIComponent(`${a.user_id}\n${dateStr} ${timeStr}\n코트 ${ct}`);
-    return `<div class="slot booked" style="background:${a.color}" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}">${a.num}</div>`;
+    return `<div class="slot booked" style="background:${a.color}" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}>${a.num}</div>`;
   }
   // 중복
   const lines = accts.map(n => { const a = ACCOUNTS.find(x=>x.num===n); return `${a.num}: ${a.user_id}`; });
   const tip = encodeURIComponent(`⚠ 중복 ${accts.length}건\n${lines.join('\n')}\n${dateStr} ${timeStr} 코트${ct}`);
   const [n1, n2] = accts;
-  return `<div class="slot dup" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}"><span>${n1}</span><span>⚠${n2}</span></div>`;
+  return `<div class="slot dup" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}><span>${n1}</span><span>⚠${n2}</span></div>`;
 }
 
 /* ── 툴팁 ── */
@@ -380,10 +465,14 @@ def build_html(accounts, init_year, init_month):
       </div>
       <div id="cal"></div>
       <div class="legend">
-        <span class="leg-item"><span class="leg-box leg-empty"></span>빈 슬롯 (예약 가능)</span>
+        <span class="leg-item"><span class="leg-box leg-empty"></span>빈 슬롯</span>
         <span class="leg-item"><span class="leg-box leg-booked"></span>단일 예약</span>
-        <span class="leg-item"><span class="leg-box leg-dup"></span>⚠ 중복 예약</span>
-        <span class="leg-item" style="color:#94a3b8">슬롯 hover → 상세 툴팁</span>
+        <span class="leg-item"><span class="leg-box leg-dup"></span>⚠ 중복</span>
+        <span class="leg-item" style="color:#94a3b8">ID 클릭 → 반전 포커스 &nbsp;|&nbsp; 슬롯 클릭 → 체크</span>
+      </div>
+      <div id="ck-panel" class="ck-panel">
+        <h3>선택 슬롯</h3>
+        <div class="ck-tags"><span class="ck-none">슬롯을 클릭해 선택하세요</span></div>
       </div>
     </main>
   </div>
