@@ -117,7 +117,13 @@ class _APIHandler(BaseHTTPRequestHandler):
             body   = json.loads(self.rfile.read(length))
             ok, detail = update_env_reservations(body["account_num"], body["slots"])
             # 저장 성공 시 최신 accounts 반환 → 브라우저 ACCOUNTS in-place 갱신용
-            fresh = load_data() if ok else None
+            # load_data()는 config.py의 validation을 거치므로 예외 처리 필요
+            try:
+                fresh = load_data() if ok else None
+            except Exception as e:
+                fresh = None
+                if ok:
+                    detail = f"저장됐지만 재로드 실패: {e}"
             payload = json.dumps({"ok": ok, "detail": detail, "accounts": fresh}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -284,7 +290,7 @@ _JS = r"""
 /* ── 상태 ── */
 let selected = new Set(ACCOUNTS.map(a => a.num));
 let CY, CM;
-const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20, 22];
+const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]; // config.py AVAILABLE_HOURS와 동일
 let focusedAcct = null;   // 포커스(반전)된 계정 번호
 let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
 
