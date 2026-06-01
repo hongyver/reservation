@@ -8,7 +8,7 @@
 
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -23,17 +23,10 @@ from selenium.common.exceptions import (
 from webdriver_manager.chrome import ChromeDriverManager
 
 import config
+from utils import wait_before_login, wait_for_reservation_open
 
 # ChromeDriver 다운로드 동시 접근 방지용 Lock
 _chromedriver_lock = threading.Lock()
-
-# 코트 번호 → value 매핑
-COURT_VALUE_MAP = {
-    1: "2",   # 1코트
-    2: "7",   # 2코트
-    3: "8",   # 3코트
-    4: "9",   # 4코트
-}
 
 
 class TennisReservationBot:
@@ -163,7 +156,7 @@ class TennisReservationBot:
 
     def select_court(self, court_number):
         """코트 선택"""
-        court_value = COURT_VALUE_MAP.get(court_number)
+        court_value = config.COURT_VALUE_MAP.get(court_number)
         if not court_value:
             self.log(f"[ERROR] 잘못된 코트 번호: {court_number}")
             return False
@@ -416,150 +409,6 @@ class TennisReservationBot:
         if self.driver:
             self.driver.quit()
             self.log("[INFO] 브라우저 종료")
-
-
-def wait_before_login():
-    """예약 오픈 10분 전까지 로그인 없이 대기.
-
-    - RESERVATION_DAY == 0: 즉시 통과
-    - 오늘이 예약일이 아닌 경우: 즉시 통과 (기존 검증 함수가 처리)
-    - 남은 시간 > 10분: 10분 전 시각까지 슬립 대기
-    - 남은 시간 <= 10분: 즉시 통과
-    """
-    if config.RESERVATION_DAY == 0:
-        return
-
-    now = datetime.now()
-    if now.day != config.RESERVATION_DAY:
-        return
-
-    target = now.replace(
-        hour=config.RESERVATION_HOUR,
-        minute=config.RESERVATION_MINUTE,
-        second=0,
-        microsecond=0
-    )
-    login_time = target - timedelta(minutes=10)
-    remaining = (login_time - now).total_seconds()
-
-    if remaining <= 0:
-        return
-
-    print(f"[PRE-WAIT] 예약 오픈({target.strftime('%H:%M')})까지 {(target - now).total_seconds():.0f}초 남았습니다.")
-    print(f"[PRE-WAIT] 로그인은 10분 전({login_time.strftime('%H:%M:%S')})부터 시작합니다.")
-
-    while True:
-        now = datetime.now()
-        remaining = (login_time - now).total_seconds()
-        if remaining <= 0:
-            break
-        if remaining > 60:
-            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음 (슬립 중)", end="", flush=True)
-            time.sleep(30)
-        else:
-            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음", end="", flush=True)
-            time.sleep(1)
-
-    print()
-    print("[INFO] 10분 전 도달. 로그인을 시작합니다.")
-
-
-def wait_for_reservation_open():
-    """예약 오픈 시간까지 대기 (공통)
-
-    RESERVATION_DAY = 0이면 바로 실행
-    RESERVATION_DAY != 0이면:
-      - 오늘이 예약일과 같으면: 예약 시간까지 대기
-      - 오늘이 예약일보다 크면: 에러 (이미 지남)
-      - 오늘이 예약일보다 작으면: 에러 (아직 예약일이 아님)
-
-    Returns:
-        bool: 성공 시 True, 실행 불가 시 False
-    """
-    # RESERVATION_DAY가 0이면 바로 실행
-    if config.RESERVATION_DAY == 0:
-        print("[INFO] 즉시 실행 모드 - 바로 예약을 시작합니다.")
-        return True
-
-    now = datetime.now()
-
-    # 오늘이 예약일인지 확인
-    if now.day != config.RESERVATION_DAY:
-        if now.day > config.RESERVATION_DAY:
-            print(f"[ERROR] 이번 달 예약일({config.RESERVATION_DAY}일)이 이미 지났습니다.")
-            print(f"[ERROR] 오늘은 {now.month}월 {now.day}일입니다.")
-            return False
-        else:
-            print(f"[ERROR] 아직 예약일이 아닙니다.")
-            print(f"[ERROR] 오늘은 {now.month}월 {now.day}일이고, 예약일은 매월 {config.RESERVATION_DAY}일입니다.")
-            return False
-
-    # 예약일이 맞으면 시간 체크
-    target = now.replace(
-        hour=config.RESERVATION_HOUR,
-        minute=config.RESERVATION_MINUTE,
-        second=0,
-        microsecond=0
-    )
-
-    if now >= target:
-        print(f"[INFO] 예약 시간({config.RESERVATION_HOUR}:{config.RESERVATION_MINUTE:02d})이 지났습니다. 바로 진행합니다.")
-        return True
-
-    wait_seconds = (target - now).total_seconds()
-    print(f"[INFO] 예약 오픈까지 {wait_seconds:.0f}초 남았습니다.")
-    print(f"[INFO] 목표 시간: {target.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    while True:
-        now = datetime.now()
-        remaining = (target - now).total_seconds()
-
-        if remaining <= 0:
-            break
-
-        if remaining > 10:
-            print(f"\r[WAIT] 남은 시간: {remaining:.0f}초", end="", flush=True)
-            time.sleep(1)
-        else:
-            print(f"\r[READY] {remaining:.1f}초 후 시작!", end="", flush=True)
-            time.sleep(0.05)
-
-    print("[GO!] 예약을 시작합니다!")
-    return True
-
-
-def worker_task(worker_id, target_date, target_hour, court, test_mode, results):
-    """워커 스레드 작업"""
-    bot = TennisReservationBot(test_mode=test_mode, worker_id=worker_id)
-
-    try:
-        bot.setup_browser()
-
-        if not bot.login():
-            results[worker_id] = False
-            return
-
-        if not bot.go_to_reservation_page():
-            results[worker_id] = False
-            return
-
-        # 예약 실행
-        success = bot.reserve_single(target_date, target_hour, court)
-        results[worker_id] = success
-
-        # 테스트 모드면 브라우저 유지
-        if test_mode and success:
-            bot.log("[TEST] 브라우저 유지 중... (30초)")
-            time.sleep(30)
-
-    except Exception as e:
-        bot.log(f"[ERROR] 워커 오류: {e}")
-        results[worker_id] = False
-
-    finally:
-        if not test_mode:
-            time.sleep(5)
-        bot.close()
 
 
 def run_reservation(test_mode=False, user_id=None, user_pw=None):
