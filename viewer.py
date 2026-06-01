@@ -499,7 +499,7 @@ async function autoSave() {
     return { date, hour: +hour, court: +court };
   });
   try {
-    const resp = await fetch(`http://127.0.0.1:${API_PORT}/api/save-slots`, {
+    const resp = await fetch('/api/save-slots', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ account_num: focusedAcct, slots }),
@@ -612,7 +612,6 @@ def build_html(accounts, init_year, init_month, api_port=8765):
 <div id="tip"></div>
 <script>
 const ACCOUNTS = {data_json};
-const API_PORT = {api_port};
 {_JS}
 </script>
 </body>
