@@ -116,7 +116,9 @@ class _APIHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             ok, detail = update_env_reservations(body["account_num"], body["slots"])
-            payload = json.dumps({"ok": ok, "detail": detail}).encode()
+            # 저장 성공 시 최신 accounts 반환 → 브라우저 ACCOUNTS in-place 갱신용
+            fresh = load_data() if ok else None
+            payload = json.dumps({"ok": ok, "detail": detail, "accounts": fresh}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(payload))
@@ -590,10 +592,23 @@ async function saveToEnv() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ account_num: focusedAcct, slots }),
     });
-    const { ok, detail } = await resp.json();
-    showSaveMsg(ok,
-      ok ? `✓ ${detail}건 저장 완료 (.env.bak 백업됨)` : `✗ 저장 실패: ${detail}`
-    );
+    const { ok, detail, accounts: fresh } = await resp.json();
+    if (ok) {
+      // ACCOUNTS in-place 갱신 (const 재할당 없이 배열 내용 교체)
+      if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
+      // 포커스 계정의 checkedSlots를 저장된 예약으로 동기화
+      if (focusedAcct) {
+        const acct = ACCOUNTS.find(a => a.num === focusedAcct);
+        checkedSlots = new Set(
+          (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
+        );
+      }
+      buildSidebar();
+      buildCalendar();
+      showSaveMsg(true, `✓ ${detail}건 저장 완료 (.env.bak 백업됨)`);
+    } else {
+      showSaveMsg(false, `✗ 저장 실패: ${detail}`);
+    }
   } catch (e) {
     showSaveMsg(false, `✗ 연결 오류 (API 서버 확인): ${e.message}`);
   } finally {
