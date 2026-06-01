@@ -198,8 +198,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .header-btns button:hover{background:rgba(255,255,255,.12)}
 .layout{display:flex;flex:1;overflow:hidden}
 
-/* 사이드바 */
-.sidebar{width:210px;min-width:210px;background:#fff;border-right:1px solid #e2e8f0;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:4px}
+/* 사이드바 래퍼: 계정 목록(가변) + 체크 패널(하단 고정) */
+.sidebar-wrap{width:220px;min-width:220px;display:flex;flex-direction:column;border-right:1px solid #e2e8f0;overflow:hidden;background:#fff}
+.sidebar{flex:1;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:4px}
 .sidebar-label{font-size:10px;font-weight:700;color:#94a3b8;letter-spacing:.08em;text-transform:uppercase;padding:4px 4px 2px}
 .acct-card{padding:7px 8px;border-radius:8px;border:1.5px solid transparent;transition:all .15s;background:#fafafa}
 .acct-card.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 7%,#fff)}
@@ -276,7 +277,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .slot.ckd{box-shadow:0 0 0 2px #22c55e!important;z-index:6}
 .slot.ckd::after{content:'✓';position:absolute;top:-6px;right:-4px;font-size:9px;color:#22c55e;font-weight:900;background:#fff;border-radius:50%;line-height:1;padding:0 1px;z-index:7}
 /* ── 체크 패널 ── */
-.ck-panel{margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #e2e8f0;border-radius:8px}
+.ck-panel{padding:10px 12px;background:#f8fafc;border-top:2px solid #e2e8f0;flex-shrink:0}
 .ck-panel h3{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
 .ck-tags{display:flex;flex-wrap:wrap;gap:4px;min-height:22px}
 .ck-tag{background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:2px 8px;font-size:11px;color:#166534;cursor:pointer;transition:background .1s}
@@ -679,7 +680,13 @@ def build_html(accounts, init_year, init_month, api_port=8765):
     </div>
   </header>
   <div class="layout">
-    <aside class="sidebar" id="sb"></aside>
+    <div class="sidebar-wrap">
+      <aside class="sidebar" id="sb"></aside>
+      <div id="ck-panel" class="ck-panel">
+        <h3>선택 슬롯</h3>
+        <div class="ck-tags"><span class="ck-none">ID를 먼저 클릭하세요</span></div>
+      </div>
+    </div>
     <main class="cal-area">
       <div class="month-nav">
         <button onclick="changeMonth(-1)">◀</button>
@@ -691,11 +698,7 @@ def build_html(accounts, init_year, init_month, api_port=8765):
         <span class="leg-item"><span class="leg-box leg-empty"></span>빈 슬롯</span>
         <span class="leg-item"><span class="leg-box leg-booked"></span>단일 예약</span>
         <span class="leg-item"><span class="leg-box leg-dup"></span>⚠ 중복</span>
-        <span class="leg-item" style="color:#94a3b8">ID 클릭 → 반전 포커스 &nbsp;|&nbsp; 슬롯 클릭 → 체크</span>
-      </div>
-      <div id="ck-panel" class="ck-panel">
-        <h3>선택 슬롯</h3>
-        <div class="ck-tags"><span class="ck-none">슬롯을 클릭해 선택하세요</span></div>
+        <span class="leg-item" style="color:#94a3b8">ID 클릭 → 반전 &nbsp;|&nbsp; 슬롯 클릭 → 체크 → 💾 저장</span>
       </div>
     </main>
   </div>
