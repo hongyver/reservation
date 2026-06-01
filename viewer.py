@@ -198,9 +198,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .header-btns button:hover{background:rgba(255,255,255,.12)}
 .layout{display:flex;flex:1;overflow:hidden}
 
-/* 사이드바 래퍼: 계정 목록(가변) + 체크 패널(하단 고정) */
-.sidebar-wrap{width:220px;min-width:220px;display:flex;flex-direction:column;border-right:1px solid #e2e8f0;overflow:hidden;background:#fff}
-.sidebar{flex:1;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:4px}
+.sidebar{width:220px;min-width:220px;background:#fff;border-right:1px solid #e2e8f0;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:4px}
 .sidebar-label{font-size:10px;font-weight:700;color:#94a3b8;letter-spacing:.08em;text-transform:uppercase;padding:4px 4px 2px}
 .acct-card{padding:7px 8px;border-radius:8px;border:1.5px solid transparent;transition:all .15s;background:#fafafa}
 .acct-card.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 7%,#fff)}
@@ -276,24 +274,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* ── 슬롯 체크 ── */
 .slot.ckd{box-shadow:0 0 0 2px #22c55e!important;z-index:6}
 .slot.ckd::after{content:'✓';position:absolute;top:-6px;right:-4px;font-size:9px;color:#22c55e;font-weight:900;background:#fff;border-radius:50%;line-height:1;padding:0 1px;z-index:7}
-/* ── 체크 패널 ── */
-.ck-panel{padding:10px 12px;background:#f8fafc;border-top:2px solid #e2e8f0;flex-shrink:0}
-.ck-panel h3{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
-.ck-tags{display:flex;flex-wrap:wrap;gap:4px;min-height:22px}
-.ck-tag{background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:2px 8px;font-size:11px;color:#166534;cursor:pointer;transition:background .1s}
-.ck-tag:hover{background:#dcfce7}
-.ck-none{font-size:11px;color:#cbd5e1}
-/* ── .env 저장 UI ── */
-.env-preview{background:#0f172a;color:#86efac;font-family:monospace;font-size:10px;padding:8px 10px;border-radius:6px;white-space:pre;overflow-x:auto;margin:6px 0;line-height:1.65;border:1px solid #1e3a2f}
-.ck-btns{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
-.save-btn{padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;background:#3b82f6;color:#fff;transition:background .15s}
-.save-btn:hover:not(:disabled){background:#2563eb}
-.save-btn:disabled{background:#94a3b8;cursor:default}
-.copy-btn{padding:5px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;background:#f8fafc;color:#475569;transition:background .15s}
-.copy-btn:hover:not(:disabled){background:#e2e8f0}
-.copy-btn:disabled{opacity:.45;cursor:default}
-.save-ok{color:#22c55e;font-size:11px;font-weight:600}
-.save-err{color:#ef4444;font-size:11px;font-weight:600}
+/* ── 실시간 저장 토스트 ── */
+#toast{position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-50px);background:#1e293b;color:#fff;padding:8px 20px;border-radius:20px;font-size:13px;font-weight:600;opacity:0;transition:all .25s;z-index:9999;pointer-events:none}
+#toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+#toast.err{background:#ef4444}
 """
 
 _JS = r"""
@@ -466,7 +450,6 @@ function buildCalendar() {
       .forEach(el => el.classList.add('ckd'));
   });
   refreshFocus();
-  renderCheckedPanel();
 }
 
 /* ── 포커스(반전) ── */
@@ -487,7 +470,6 @@ function focusAcct(num) {
     const card = document.getElementById('ac'+a.num);
     if (card) card.classList.toggle('fc', focusedAcct === a.num);
   });
-  // buildCalendar 내부에서 ckd 복원 + refreshFocus + renderCheckedPanel 모두 처리
   buildCalendar();
 }
 
@@ -501,58 +483,47 @@ function refreshFocus() {
   });
 }
 
-/* ── 슬롯 체크 ── */
+/* ── 슬롯 체크 + 실시간 저장 ── */
 function clickSlot(el, dateStr, hr, ct) {
-  if (!focusedAcct) return;  // 포커스(반전)된 계정이 없으면 슬롯 선택 불가
+  if (!focusedAcct) return;
   const key = `${dateStr}:${hr}:${ct}`;
   checkedSlots.has(key) ? checkedSlots.delete(key) : checkedSlots.add(key);
   buildCalendar();
+  autoSave();
 }
 
-function uncheckSlot(key) {
-  checkedSlots.delete(key);
-  buildCalendar();
+async function autoSave() {
+  if (!focusedAcct) return;
+  const slots = [...checkedSlots].sort().map(k => {
+    const [date, hour, court] = k.split(':');
+    return { date, hour: +hour, court: +court };
+  });
+  try {
+    const resp = await fetch(`http://127.0.0.1:${API_PORT}/api/save-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_num: focusedAcct, slots }),
+    });
+    const { ok, detail, accounts: fresh } = await resp.json();
+    if (ok) {
+      if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
+      buildSidebar();
+      showToast(`✓ ${detail}건 저장됨`);
+    } else {
+      showToast('✗ 저장 실패', true);
+    }
+  } catch (e) {
+    showToast('✗ 연결 오류', true);
+  }
 }
 
-function buildEnvPreview(acct, sortedKeys) {
-  return sortedKeys.map((k, i) =>
-    `TENNIS_ACCOUNT_${acct.num}_RESERVATION_${i+1}=${k}`
-  ).join('\n');
-}
-
-function renderCheckedPanel() {
-  const panel = document.getElementById('ck-panel');
-  if (!panel) return;
-  const acct   = focusedAcct !== null ? ACCOUNTS.find(a => a.num === focusedAcct) : null;
-  const sorted = [...checkedSlots].sort();
-  const hasData = acct && sorted.length > 0;
-  const dis = hasData ? '' : 'disabled';
-
-  const tags = sorted.length === 0
-    ? '<span class="ck-none">슬롯을 클릭해 선택하세요</span>'
-    : sorted.map(k => {
-        const [d, h, c] = k.split(':');
-        return `<span class="ck-tag" onclick="uncheckSlot('${k}')">`+
-               `${d} ${String(+h).padStart(2,'0')}:00 C${c} ×</span>`;
-      }).join('');
-
-  const preview = hasData
-    ? `<div class="env-preview">${buildEnvPreview(acct, sorted)}</div>`
-    : '';
-
-  const title = acct
-    ? `선택 슬롯 — ${acct.user_id} (계정 ${acct.num})  ${sorted.length}건`
-    : '선택 슬롯';
-
-  panel.innerHTML =
-    `<h3>${title}</h3>` +
-    `<div class="ck-tags">${tags}</div>` +
-    preview +
-    `<div class="ck-btns">` +
-      `<button id="save-btn" class="save-btn" onclick="saveToEnv()" ${dis}>💾 .env 저장</button>` +
-      `<button class="copy-btn" onclick="copyEnvToClipboard()" ${dis}>📋 복사</button>` +
-      `<span id="save-msg"></span>` +
-    `</div>`;
+function showToast(msg, isError = false) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'show' + (isError ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = ''; }, 2000);
 }
 
 function makeSlot(accts, dateStr, hr, ct) {
@@ -573,66 +544,6 @@ function makeSlot(accts, dateStr, hr, ct) {
   const tip = encodeURIComponent(`⚠ 중복 ${accts.length}건\n${lines.join('\n')}\n${dateStr} ${timeStr} 코트${ct}`);
   const [n1, n2] = accts;
   return `<div class="slot dup" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}><span>${n1}</span><span>⚠${n2}</span></div>`;
-}
-
-/* ── .env 저장 / 복사 ── */
-async function saveToEnv() {
-  if (!focusedAcct)       { alert('계정을 먼저 클릭해 선택하세요.'); return; }
-  if (!checkedSlots.size) { alert('체크된 슬롯이 없습니다.'); return; }
-
-  const btn = document.getElementById('save-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '저장 중...'; }
-
-  const slots = [...checkedSlots].sort().map(k => {
-    const [date, hour, court] = k.split(':');
-    return { date, hour: +hour, court: +court };
-  });
-
-  try {
-    const resp = await fetch(`http://127.0.0.1:${API_PORT}/api/save-slots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_num: focusedAcct, slots }),
-    });
-    const { ok, detail, accounts: fresh } = await resp.json();
-    if (ok) {
-      // ACCOUNTS in-place 갱신 (const 재할당 없이 배열 내용 교체)
-      if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
-      // 포커스 계정의 checkedSlots를 저장된 예약으로 동기화
-      if (focusedAcct) {
-        const acct = ACCOUNTS.find(a => a.num === focusedAcct);
-        checkedSlots = new Set(
-          (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
-        );
-      }
-      buildSidebar();
-      buildCalendar();
-      showSaveMsg(true, `✓ ${detail}건 저장 완료 (.env.bak 백업됨)`);
-    } else {
-      showSaveMsg(false, `✗ 저장 실패: ${detail}`);
-    }
-  } catch (e) {
-    showSaveMsg(false, `✗ 연결 오류 (API 서버 확인): ${e.message}`);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '💾 .env 저장'; }
-  }
-}
-
-function copyEnvToClipboard() {
-  if (!focusedAcct || !checkedSlots.size) return;
-  const acct   = ACCOUNTS.find(a => a.num === focusedAcct);
-  const sorted = [...checkedSlots].sort();
-  navigator.clipboard.writeText(buildEnvPreview(acct, sorted))
-    .then(() => showSaveMsg(true,  '✓ 클립보드에 복사됨'))
-    .catch(e  => showSaveMsg(false, `✗ 복사 실패: ${e.message}`));
-}
-
-function showSaveMsg(ok, msg) {
-  const el = document.getElementById('save-msg');
-  if (!el) return;
-  el.textContent = msg;
-  el.className = ok ? 'save-ok' : 'save-err';
-  setTimeout(() => { if (el) el.textContent = ''; }, 5000);
 }
 
 /* ── 툴팁 ── */
@@ -680,13 +591,7 @@ def build_html(accounts, init_year, init_month, api_port=8765):
     </div>
   </header>
   <div class="layout">
-    <div class="sidebar-wrap">
-      <aside class="sidebar" id="sb"></aside>
-      <div id="ck-panel" class="ck-panel">
-        <h3>선택 슬롯</h3>
-        <div class="ck-tags"><span class="ck-none">ID를 먼저 클릭하세요</span></div>
-      </div>
-    </div>
+    <aside class="sidebar" id="sb"></aside>
     <main class="cal-area">
       <div class="month-nav">
         <button onclick="changeMonth(-1)">◀</button>
@@ -703,6 +608,7 @@ def build_html(accounts, init_year, init_month, api_port=8765):
     </main>
   </div>
 </div>
+<div id="toast"></div>
 <div id="tip"></div>
 <script>
 const ACCOUNTS = {data_json};
