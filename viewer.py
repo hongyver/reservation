@@ -381,7 +381,9 @@ function slotMap() {
   const m = {};
   const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
   ACCOUNTS.forEach(a => {
-    if (!selected.has(a.num)) return;
+    // 포커스 계정은 selected 여부와 무관하게 항상 처리
+    // (체크박스 해제 시 checkedSlots 편집 내용이 사라지는 현상 방지)
+    if (a.num !== focusedAcct && !selected.has(a.num)) return;
 
     // 포커스 계정: 사용자가 편집 중인 checkedSlots 기준
     // (체크 추가 → 달력에 색상+번호 표시 / 체크 해제 → 달력에서 제거)
@@ -500,10 +502,9 @@ function refreshFocus() {
 
 /* ── 슬롯 체크 ── */
 function clickSlot(el, dateStr, hr, ct) {
+  if (!focusedAcct) return;  // 포커스(반전)된 계정이 없으면 슬롯 선택 불가
   const key = `${dateStr}:${hr}:${ct}`;
   checkedSlots.has(key) ? checkedSlots.delete(key) : checkedSlots.add(key);
-  // buildCalendar: slotMap 재계산 → 포커스 계정 색상+번호 반영
-  //               ckd 복원 + refreshFocus + renderCheckedPanel 통합 처리
   buildCalendar();
 }
 
