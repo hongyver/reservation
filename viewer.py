@@ -293,7 +293,6 @@ let CY, CM;
 const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]; // config.py AVAILABLE_HOURS와 동일
 let focusedAcct = null;   // 포커스(반전)된 계정 번호
 let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
-let _saveDebounce = null; // 저장 debounce 타이머
 let _saveSeq = 0;         // race condition 방지 — 마지막 요청 번호
 
 /* ── 초기화 ── */
@@ -463,35 +462,23 @@ function buildCalendar() {
 
 /* ── 포커스(반전) ── */
 function focusAcct(num) {
+  // ID 전환은 포커스 상태만 변경한다. 저장은 하지 않는다.
+  // 저장은 슬롯 클릭(clickSlot) 시에만 발생한다.
+  // 이 원칙을 지켜야 "ID 재선택 시 원상복귀" 문제가 발생하지 않는다.
+
   if (focusedAcct === num) {
-    // 같은 ID 재클릭 → pending debounce 취소 + 현재 상태 즉시 저장 후 포커스 해제
-    // autoSave()를 먼저 호출해 acctNum/slots를 현재 값으로 캡처한 뒤
-    // focusedAcct/checkedSlots를 초기화한다.
-    // buildCalendar()는 호출하지 않는다:
-    //   재클릭 직후에는 ACCOUNTS가 아직 서버 응답 전 상태여서
-    //   buildCalendar()를 즉시 호출하면 이전 예약만 표시됨(원상복귀처럼 보임).
-    //   autoSave 완료 후 ACCOUNTS 갱신 → buildCalendar() 자동 호출됨.
-    clearTimeout(_saveDebounce);
-    _saveDebounce = null;
-    autoSave();
+    // 같은 ID 재클릭 → 포커스 해제
     focusedAcct = null;
     checkedSlots = new Set();
     ACCOUNTS.forEach(a => {
       const card = document.getElementById('ac'+a.num);
       if (card) card.classList.remove('fc');
     });
+    buildCalendar();
     return;
   }
 
-  // 다른 ID로 전환 전: 현재 편집 내용을 먼저 저장
-  // (clearTimeout 없이 넘어가면 타이머가 새 focusedAcct로 잘못 저장됨)
-  if (focusedAcct !== null) {
-    clearTimeout(_saveDebounce);
-    _saveDebounce = null;
-    autoSave();  // acctNum=이전 ID, slots=현재 checkedSlots 캡처 후 저장
-  }
-
-  // 새 계정 선택 → 해당 계정의 현재 예약을 checkedSlots에 로드
+  // 새 ID 선택 → ACCOUNTS 기준으로 예약 로드 (저장 없음)
   focusedAcct = num;
   const acct = ACCOUNTS.find(a => a.num === num);
   checkedSlots = new Set(
@@ -520,15 +507,7 @@ function clickSlot(el, dateStr, hr, ct) {
   const key = `${dateStr}:${hr}:${ct}`;
   checkedSlots.has(key) ? checkedSlots.delete(key) : checkedSlots.add(key);
   buildCalendar();
-  scheduleSave();  // debounce 저장: 연속 클릭 시 마지막 상태만 저장
-}
-
-function scheduleSave() {
-  clearTimeout(_saveDebounce);
-  _saveDebounce = setTimeout(() => {
-    _saveDebounce = null;  // 타이머 완료 → pending 없음 표시
-    autoSave();
-  }, 400);
+  autoSave();  // 슬롯 클릭 시에만 저장 — ID 전환은 저장하지 않음
 }
 
 async function autoSave() {
@@ -550,13 +529,10 @@ async function autoSave() {
     // 이전 요청의 늦은 응답이 최신 상태를 덮어쓰는 race condition 방지
     if (ok && seq === _saveSeq) {
       if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
-      // pending 편집이 없을 때만 checkedSlots를 서버 결과와 동기화
-      // _saveDebounce !== null = 저장 응답 대기 중에 사용자가 추가 편집함
-      //   → 동기화 금지: 편집 중인 내용 보존
-      // _saveDebounce === null = 이 저장이 마지막 (추가 편집 없음)
-      //   → 동기화 OK: UI = .env 일치 확정
-      if (focusedAcct && _saveDebounce === null) {
-        const acct = ACCOUNTS.find(a => a.num === focusedAcct);
+      // 저장한 계정이 아직 포커스 상태이면 checkedSlots를 서버 결과와 동기화
+      // (연속 클릭 중 마지막 응답만 반영 — seq 체크로 race condition 방지됨)
+      if (focusedAcct === acctNum) {
+        const acct = ACCOUNTS.find(a => a.num === acctNum);
         checkedSlots = new Set(
           (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
         );
