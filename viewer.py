@@ -293,6 +293,8 @@ let CY, CM;
 const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]; // config.py AVAILABLE_HOURS와 동일
 let focusedAcct = null;   // 포커스(반전)된 계정 번호
 let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
+let _saveDebounce = null; // 저장 debounce 타이머
+let _saveSeq = 0;         // race condition 방지 — 마지막 요청 번호
 
 /* ── 초기화 ── */
 (function init() {
@@ -462,9 +464,10 @@ function buildCalendar() {
 /* ── 포커스(반전) ── */
 function focusAcct(num) {
   if (focusedAcct === num) {
-    // 같은 ID 재클릭 → 현재 선택 저장 후 포커스 해제
-    // autoSave()는 비동기지만 acctNum을 내부에서 캡처하므로
-    // focusedAcct = null 이후에도 올바른 계정으로 저장됨
+    // 같은 ID 재클릭 → pending debounce 취소 + 현재 상태 즉시 저장 후 포커스 해제
+    // seq/acctNum/slots 를 autoSave 내에서 캡처하므로
+    // 아래 focusedAcct=null 이후에도 올바른 계정으로 저장됨
+    clearTimeout(_saveDebounce);
     autoSave();
     focusedAcct = null;
     checkedSlots = new Set();
@@ -505,16 +508,22 @@ function clickSlot(el, dateStr, hr, ct) {
   const key = `${dateStr}:${hr}:${ct}`;
   checkedSlots.has(key) ? checkedSlots.delete(key) : checkedSlots.add(key);
   buildCalendar();
-  autoSave();
+  scheduleSave();  // debounce 저장: 연속 클릭 시 마지막 상태만 저장
+}
+
+function scheduleSave() {
+  clearTimeout(_saveDebounce);
+  _saveDebounce = setTimeout(() => autoSave(), 400);
 }
 
 async function autoSave() {
-  const acctNum = focusedAcct;  // 비동기 실행 전 캡처 — 이후 focusedAcct가 바뀌어도 안전
-  if (!acctNum) return;
-  const slots = [...checkedSlots].sort().map(k => {
+  const seq     = ++_saveSeq;             // 이 요청의 순번 확정
+  const acctNum = focusedAcct;            // 캡처 — focusedAcct가 이후 바뀌어도 안전
+  const slots   = [...checkedSlots].sort().map(k => {
     const [date, hour, court] = k.split(':');
     return { date, hour: +hour, court: +court };
   });
+  if (!acctNum) return;
   try {
     const resp = await fetch('/api/save-slots', {
       method: 'POST',
@@ -522,11 +531,15 @@ async function autoSave() {
       body: JSON.stringify({ account_num: acctNum, slots }),
     });
     const { ok, detail, accounts: fresh } = await resp.json();
-    if (ok) {
+    // 순번이 맞는 (= 가장 마지막) 응답만 ACCOUNTS를 갱신
+    // 이전 요청의 늦은 응답이 최신 상태를 덮어쓰는 race condition 방지
+    if (ok && seq === _saveSeq) {
       if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
       buildSidebar();
+      // 포커스 해제 상태에서도 달력을 최신 예약으로 갱신
+      if (!focusedAcct) buildCalendar();
       showToast(`✓ ${detail}건 저장됨`);
-    } else {
+    } else if (!ok) {
       showToast('✗ 저장 실패', true);
     }
   } catch (e) {
