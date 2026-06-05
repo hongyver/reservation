@@ -468,6 +468,7 @@ function focusAcct(num) {
     // seq/acctNum/slots 를 autoSave 내에서 캡처하므로
     // 아래 focusedAcct=null 이후에도 올바른 계정으로 저장됨
     clearTimeout(_saveDebounce);
+    _saveDebounce = null;  // pending 없음 표시 → autoSave 완료 시 동기화 허용
     autoSave();
     focusedAcct = null;
     checkedSlots = new Set();
@@ -513,7 +514,10 @@ function clickSlot(el, dateStr, hr, ct) {
 
 function scheduleSave() {
   clearTimeout(_saveDebounce);
-  _saveDebounce = setTimeout(() => autoSave(), 400);
+  _saveDebounce = setTimeout(() => {
+    _saveDebounce = null;  // 타이머 완료 → pending 없음 표시
+    autoSave();
+  }, 400);
 }
 
 async function autoSave() {
@@ -535,16 +539,19 @@ async function autoSave() {
     // 이전 요청의 늦은 응답이 최신 상태를 덮어쓰는 race condition 방지
     if (ok && seq === _saveSeq) {
       if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
-      // 포커스 계정의 checkedSlots를 서버 저장 결과와 동기화
-      // → UI(.checkedSlots) = .env(ACCOUNTS) 항상 일치 보장
-      if (focusedAcct) {
+      // pending 편집이 없을 때만 checkedSlots를 서버 결과와 동기화
+      // _saveDebounce !== null = 저장 응답 대기 중에 사용자가 추가 편집함
+      //   → 동기화 금지: 편집 중인 내용 보존
+      // _saveDebounce === null = 이 저장이 마지막 (추가 편집 없음)
+      //   → 동기화 OK: UI = .env 일치 확정
+      if (focusedAcct && _saveDebounce === null) {
         const acct = ACCOUNTS.find(a => a.num === focusedAcct);
         checkedSlots = new Set(
           (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
         );
       }
       buildSidebar();
-      buildCalendar();  // 포커스 유무 관계없이 항상 달력 갱신
+      buildCalendar();
       showToast(`✓ ${detail}건 저장됨`);
     } else if (!ok) {
       showToast('✗ 저장 실패', true);
