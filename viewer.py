@@ -465,10 +465,14 @@ function buildCalendar() {
 function focusAcct(num) {
   if (focusedAcct === num) {
     // 같은 ID 재클릭 → pending debounce 취소 + 현재 상태 즉시 저장 후 포커스 해제
-    // seq/acctNum/slots 를 autoSave 내에서 캡처하므로
-    // 아래 focusedAcct=null 이후에도 올바른 계정으로 저장됨
+    // autoSave()를 먼저 호출해 acctNum/slots를 현재 값으로 캡처한 뒤
+    // focusedAcct/checkedSlots를 초기화한다.
+    // buildCalendar()는 호출하지 않는다:
+    //   재클릭 직후에는 ACCOUNTS가 아직 서버 응답 전 상태여서
+    //   buildCalendar()를 즉시 호출하면 이전 예약만 표시됨(원상복귀처럼 보임).
+    //   autoSave 완료 후 ACCOUNTS 갱신 → buildCalendar() 자동 호출됨.
     clearTimeout(_saveDebounce);
-    _saveDebounce = null;  // pending 없음 표시 → autoSave 완료 시 동기화 허용
+    _saveDebounce = null;
     autoSave();
     focusedAcct = null;
     checkedSlots = new Set();
@@ -476,7 +480,6 @@ function focusAcct(num) {
       const card = document.getElementById('ac'+a.num);
       if (card) card.classList.remove('fc');
     });
-    buildCalendar();
     return;
   }
 
@@ -563,9 +566,11 @@ async function autoSave() {
       showToast(`✓ ${detail}건 저장됨`);
     } else if (!ok) {
       showToast('✗ 저장 실패', true);
+      buildCalendar();  // 실패 시도 달력 갱신 (포커스 해제 후 최신 상태 표시)
     }
   } catch (e) {
     showToast('✗ 연결 오류', true);
+    buildCalendar();  // 오류 시도 달력 갱신
   }
 }
 
