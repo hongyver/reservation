@@ -462,23 +462,22 @@ function buildCalendar() {
 
 /* ── 포커스(반전) ── */
 function focusAcct(num) {
-  // ID 전환은 포커스 상태만 변경한다. 저장은 하지 않는다.
-  // 저장은 슬롯 클릭(clickSlot) 시에만 발생한다.
-  // 이 원칙을 지켜야 "ID 재선택 시 원상복귀" 문제가 발생하지 않는다.
-
   if (focusedAcct === num) {
-    // 같은 ID 재클릭 → 포커스 해제
+    // 예약 변경 모드 OFF
+    // ACCOUNTS = 마지막 autoSave 완료 시점의 .env 값.
+    // checkedSlots 를 비우고 ACCOUNTS 기준으로 달력을 표시하면
+    // "저장된 .env 와 UI 동기화" 조건을 만족한다.
     focusedAcct = null;
     checkedSlots = new Set();
     ACCOUNTS.forEach(a => {
       const card = document.getElementById('ac'+a.num);
       if (card) card.classList.remove('fc');
     });
-    buildCalendar();
+    buildCalendar();  // ACCOUNTS(= 저장된 .env) 기준 표시
     return;
   }
 
-  // 새 ID 선택 → ACCOUNTS 기준으로 예약 로드 (저장 없음)
+  // 예약 변경 모드 ON — ACCOUNTS 기준으로 예약 로드 (저장 없음)
   focusedAcct = num;
   const acct = ACCOUNTS.find(a => a.num === num);
   checkedSlots = new Set(
@@ -529,24 +528,18 @@ async function autoSave() {
     // 이전 요청의 늦은 응답이 최신 상태를 덮어쓰는 race condition 방지
     if (ok && seq === _saveSeq) {
       if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
-      // 저장한 계정이 아직 포커스 상태이면 checkedSlots를 서버 결과와 동기화
-      // (연속 클릭 중 마지막 응답만 반영 — seq 체크로 race condition 방지됨)
-      if (focusedAcct === acctNum) {
-        const acct = ACCOUNTS.find(a => a.num === acctNum);
-        checkedSlots = new Set(
-          (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
-        );
-      }
+      // ACCOUNTS 갱신 후 사이드바(예약 건수)만 갱신한다.
+      // checkedSlots 와 달력은 건드리지 않는다:
+      //   - 편집 중인 checkedSlots 를 서버 값으로 덮어쓰면 원상복귀가 발생한다.
+      //   - 달력은 slotMap 이 checkedSlots 기준으로 이미 올바르게 표시 중이다.
+      //   - ID 재선택 시 buildCalendar() 가 ACCOUNTS 기준으로 표시한다 (= .env 동기화).
       buildSidebar();
-      buildCalendar();
       showToast(`✓ ${detail}건 저장됨`);
     } else if (!ok) {
       showToast('✗ 저장 실패', true);
-      buildCalendar();  // 실패 시도 달력 갱신 (포커스 해제 후 최신 상태 표시)
     }
   } catch (e) {
     showToast('✗ 연결 오류', true);
-    buildCalendar();  // 오류 시도 달력 갱신
   }
 }
 
