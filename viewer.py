@@ -535,9 +535,16 @@ async function autoSave() {
     // 이전 요청의 늦은 응답이 최신 상태를 덮어쓰는 race condition 방지
     if (ok && seq === _saveSeq) {
       if (fresh) { ACCOUNTS.length = 0; fresh.forEach(a => ACCOUNTS.push(a)); }
+      // 포커스 계정의 checkedSlots를 서버 저장 결과와 동기화
+      // → UI(.checkedSlots) = .env(ACCOUNTS) 항상 일치 보장
+      if (focusedAcct) {
+        const acct = ACCOUNTS.find(a => a.num === focusedAcct);
+        checkedSlots = new Set(
+          (acct?.reservations || []).map(r => `${r.date}:${r.hour}:${r.court}`)
+        );
+      }
       buildSidebar();
-      // 포커스 해제 상태에서도 달력을 최신 예약으로 갱신
-      if (!focusedAcct) buildCalendar();
+      buildCalendar();  // 포커스 유무 관계없이 항상 달력 갱신
       showToast(`✓ ${detail}건 저장됨`);
     } else if (!ok) {
       showToast('✗ 저장 실패', true);
