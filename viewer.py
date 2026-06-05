@@ -313,8 +313,9 @@ function buildSidebar() {
   sb.innerHTML = '<div class="sidebar-label">계정 목록</div>' +
     ACCOUNTS.map(a => {
       const on = selected.has(a.num);
+      const fc = a.num === focusedAcct ? ' fc' : '';
       return `
-<div class="acct-card ${on?'on':'off'}" style="--c:${a.color}" id="ac${a.num}"
+<div class="acct-card ${on?'on':'off'}${fc}" style="--c:${a.color}" id="ac${a.num}"
      onclick="if(!event.target.closest('input,button'))focusAcct(${a.num})">
   <div class="acct-r1">
     <input type="checkbox" class="acct-cb" ${on?'checked':''} onchange="toggleAcct(${a.num})" style="accent-color:${a.color}">
