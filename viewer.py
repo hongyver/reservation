@@ -461,9 +461,20 @@ function buildCalendar() {
 
 /* ── 포커스(반전) ── */
 function focusAcct(num) {
-  // 같은 ID 재클릭 무시 — autoSave()가 이미 저장했으므로 재클릭으로
-  // checkedSlots를 초기화하면 예약/취소 상태가 원상복구되는 문제 발생
-  if (focusedAcct === num) return;
+  if (focusedAcct === num) {
+    // 같은 ID 재클릭 → 현재 선택 저장 후 포커스 해제
+    // autoSave()는 비동기지만 acctNum을 내부에서 캡처하므로
+    // focusedAcct = null 이후에도 올바른 계정으로 저장됨
+    autoSave();
+    focusedAcct = null;
+    checkedSlots = new Set();
+    ACCOUNTS.forEach(a => {
+      const card = document.getElementById('ac'+a.num);
+      if (card) card.classList.remove('fc');
+    });
+    buildCalendar();
+    return;
+  }
 
   // 새 계정 선택 → 해당 계정의 현재 예약을 checkedSlots에 로드
   focusedAcct = num;
@@ -498,7 +509,8 @@ function clickSlot(el, dateStr, hr, ct) {
 }
 
 async function autoSave() {
-  if (!focusedAcct) return;
+  const acctNum = focusedAcct;  // 비동기 실행 전 캡처 — 이후 focusedAcct가 바뀌어도 안전
+  if (!acctNum) return;
   const slots = [...checkedSlots].sort().map(k => {
     const [date, hour, court] = k.split(':');
     return { date, hour: +hour, court: +court };
@@ -507,7 +519,7 @@ async function autoSave() {
     const resp = await fetch('/api/save-slots', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_num: focusedAcct, slots }),
+      body: JSON.stringify({ account_num: acctNum, slots }),
     });
     const { ok, detail, accounts: fresh } = await resp.json();
     if (ok) {
