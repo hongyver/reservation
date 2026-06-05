@@ -480,6 +480,14 @@ function focusAcct(num) {
     return;
   }
 
+  // 다른 ID로 전환 전: 현재 편집 내용을 먼저 저장
+  // (clearTimeout 없이 넘어가면 타이머가 새 focusedAcct로 잘못 저장됨)
+  if (focusedAcct !== null) {
+    clearTimeout(_saveDebounce);
+    _saveDebounce = null;
+    autoSave();  // acctNum=이전 ID, slots=현재 checkedSlots 캡처 후 저장
+  }
+
   // 새 계정 선택 → 해당 계정의 현재 예약을 checkedSlots에 로드
   focusedAcct = num;
   const acct = ACCOUNTS.find(a => a.num === num);
