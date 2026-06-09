@@ -14,6 +14,7 @@
 """
 
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -148,8 +149,34 @@ def start_api_server():
 
 # ─── 데이터 로드 ──────────────────────────────────────────────────────────────
 
+def _reload_env():
+    """.env를 os.environ에 강제 반영한다.
+
+    config.load_env_file()은 'if key not in os.environ' 조건으로
+    이미 세팅된 키를 절대 덮어쓰지 않는다. save 후 load_data()를
+    재호출해도 os.environ이 갱신되지 않아 stale 데이터가 반환된다.
+    이 함수는 .env를 직접 파싱해 강제 갱신하고,
+    .env에서 삭제된 TENNIS_ACCOUNT_* 키를 os.environ에서도 제거한다.
+    """
+    env_path = SCRIPT_DIR / ".env"
+    if not env_path.exists():
+        return
+    env_keys = set()
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            os.environ[k] = v.strip()
+            env_keys.add(k)
+    for key in list(os.environ.keys()):
+        if key.startswith("TENNIS_ACCOUNT_") and key not in env_keys:
+            del os.environ[key]
+
+
 def load_data():
     """config 모듈에서 계정과 예약 데이터를 로드한다."""
+    _reload_env()
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "config", SCRIPT_DIR / "config.py"
