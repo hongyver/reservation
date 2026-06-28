@@ -13,6 +13,7 @@
     python3 main.py --search 2026-02  # 2026년 2월 검색
 """
 
+import asyncio
 import sys
 import argparse
 from datetime import datetime
@@ -24,14 +25,12 @@ import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import config
-from reservation_http import (
-    TennisReservationHTTP,
-    run_reservation_http,
-    search_available_slots,
-    search_all_slots,
-    MAX_RETRIES,
-    REQUEST_TIMEOUT
+from reservation_async import (
+    run_reservation_async,
+    search_available_slots_async,
+    search_all_slots_async,
 )
+from reservation_http import TennisReservationHTTP
 
 
 def get_credentials():
@@ -147,8 +146,8 @@ def print_config():
     print()
 
     print("[접속 폭주 대응 설정]")
-    print(f"  최대 재시도: {MAX_RETRIES}회")
-    print(f"  타임아웃: 연결 {REQUEST_TIMEOUT[0]}초, 읽기 {REQUEST_TIMEOUT[1]}초")
+    print(f"  최대 재시도: {config.MAX_RETRIES}회")
+    print(f"  타임아웃: 연결 {config.CONNECTION_TIMEOUT}초, 읽기 {config.READ_TIMEOUT}초")
     print()
 
     return True
@@ -311,7 +310,22 @@ def main():
                         help="주말 예약 가능 시간 검색 (예: 2 또는 2026-02)")
     parser.add_argument("--search2", metavar="MONTH",
                         help="전체 날짜/시간 예약 가능 시간 검색 (예: 2 또는 2026-02)")
+    parser.add_argument("--account", type=int, metavar="N",
+                        help="실행할 계정 번호 (launch.py 다중 계정 모드에서 자동 호출)")
     args = parser.parse_args()
+
+    # --account N: 해당 계정 설정으로 config 오버라이드
+    if args.account:
+        accounts = config.load_accounts()
+        acct = next((a for a in accounts if a["num"] == args.account), None)
+        if not acct:
+            print(f"[ERROR] .env에 TENNIS_ACCOUNT_{args.account}_ID/PW가 없습니다.")
+            sys.exit(1)
+        config.USER_ID = acct["user_id"]
+        config.USER_PW = acct["user_pw"]
+        if acct["reservation_config"] is not None:
+            config.RESERVATION_CONFIG = acct["reservation_config"]
+        print(f"[계정 {args.account}] {acct['user_id']} 로 실행합니다.")
 
     # 검색 모드는 설정 출력 생략하지만 로그인 정보는 필요
     if args.search or args.search2:
@@ -324,9 +338,11 @@ def main():
     if args.search:
         try:
             year, month = parse_search_month(args.search)
-            result = search_available_slots(year, month, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                search_available_slots_async(year, month, user_id=user_id, user_pw=user_pw)
+            )
             sys.exit(0 if result.get("total", 0) > 0 else 1)
-        except ValueError as e:
+        except ValueError:
             print(f"[ERROR] 잘못된 월 형식: {args.search}")
             print("[INFO] 사용법: --search 2 또는 --search 2026-02")
             sys.exit(1)
@@ -335,9 +351,11 @@ def main():
     if args.search2:
         try:
             year, month = parse_search_month(args.search2)
-            result = search_all_slots(year, month, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                search_all_slots_async(year, month, user_id=user_id, user_pw=user_pw)
+            )
             sys.exit(0 if result.get("total", 0) > 0 else 1)
-        except ValueError as e:
+        except ValueError:
             print(f"[ERROR] 잘못된 월 형식: {args.search2}")
             print("[INFO] 사용법: --search2 2 또는 --search2 2026-02")
             sys.exit(1)
@@ -373,7 +391,9 @@ def main():
         if args.browser:
             success = run_browser_mode(test_mode=True, user_id=user_id, user_pw=user_pw)
         else:
-            result = run_reservation_http(test_mode=True, user_id=user_id, user_pw=user_pw)
+            result = asyncio.run(
+                run_reservation_async(test_mode=True, user_id=user_id, user_pw=user_pw)
+            )
             success = result.get("success", False)
 
         sys.exit(0 if success else 1)
@@ -390,7 +410,9 @@ def main():
     if args.browser:
         success = run_browser_mode(test_mode=False, user_id=user_id, user_pw=user_pw)
     else:
-        result = run_reservation_http(test_mode=False, user_id=user_id, user_pw=user_pw)
+        result = asyncio.run(
+            run_reservation_async(test_mode=False, user_id=user_id, user_pw=user_pw)
+        )
         success = result.get("success", False)
 
     sys.exit(0 if success else 1)

@@ -1,6 +1,11 @@
 # 민감 정보
 .env
+.env.bak
+.env.bak.*
 credentials.txt
+
+# Claude Code 로컬 설정
+.claude/
 
 # Python
 __pycache__/

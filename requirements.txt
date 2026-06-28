@@ -2,6 +2,7 @@
 flask>=3.0.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+aiohttp>=3.9.0
 
 # 브라우저 기반 (로컬 PC용 - 선택사항)
 selenium>=4.15.0

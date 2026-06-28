@@ -9,7 +9,7 @@ Chrome 브라우저 없이 requests로 직접 HTTP 요청
 import time
 import random
 import calendar
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -18,20 +18,7 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 import config
-
-# 코트 번호 → value 매핑
-COURT_VALUE_MAP = {
-    1: "2",   # 1코트
-    2: "7",   # 2코트
-    3: "8",   # 3코트
-    4: "9",   # 4코트
-}
-
-# 재시도 설정
-MAX_RETRIES = 10          # 최대 재시도 횟수
-RETRY_DELAY_MIN = 0.1     # 최소 재시도 대기 (초)
-RETRY_DELAY_MAX = 1.0     # 최대 재시도 대기 (초)
-REQUEST_TIMEOUT = (5, 30) # (연결 타임아웃, 읽기 타임아웃)
+from utils import wait_before_login, wait_for_reservation_open
 
 
 class TennisReservationHTTP:
@@ -53,16 +40,16 @@ class TennisReservationHTTP:
 
         # 재시도 전략 설정
         retry_strategy = Retry(
-            total=3,
-            backoff_factor=0.5,
+            total=config.SESSION_RETRY_TOTAL,
+            backoff_factor=config.SESSION_RETRY_BACKOFF,
             status_forcelist=[500, 502, 503, 504],
             allowed_methods=["GET", "POST"]
         )
 
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10
+            pool_connections=config.SESSION_POOL_SIZE,
+            pool_maxsize=config.SESSION_POOL_SIZE
         )
 
         self.session.mount("https://", adapter)
@@ -92,9 +79,11 @@ class TennisReservationHTTP:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         print(f"{timestamp} {self.prefix} {msg}")
 
-    def _request_with_retry(self, method, url, max_retries=MAX_RETRIES, **kwargs):
+    def _request_with_retry(self, method, url, max_retries=None, **kwargs):
         """재시도 로직이 포함된 HTTP 요청"""
-        kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+        if max_retries is None:
+            max_retries = config.MAX_RETRIES
+        kwargs.setdefault("timeout", (config.CONNECTION_TIMEOUT, config.READ_TIMEOUT))
 
         last_error = None
 
@@ -134,7 +123,7 @@ class TennisReservationHTTP:
 
             # 재시도 대기 (랜덤 지터 추가)
             if attempt < max_retries - 1:
-                delay = random.uniform(RETRY_DELAY_MIN, RETRY_DELAY_MAX)
+                delay = random.uniform(config.RETRY_DELAY_MIN, config.RETRY_DELAY_MAX)
                 time.sleep(delay)
 
         raise last_error or Exception("최대 재시도 횟수 초과")
@@ -144,7 +133,7 @@ class TennisReservationHTTP:
         user_id = user_id or config.USER_ID
         user_pw = user_pw or config.USER_PW
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(config.MAX_RETRIES):
             try:
                 self.log("[INFO] 로그인 시도...")
 
@@ -165,11 +154,11 @@ class TennisReservationHTTP:
                     self.log("[SUCCESS] 로그인 성공!")
                     return True
 
-                self.log(f"[WARN] 로그인 확인 실패, 재시도 {attempt+1}/{MAX_RETRIES}")
+                self.log(f"[WARN] 로그인 확인 실패, 재시도 {attempt+1}/{config.MAX_RETRIES}")
 
             except Exception as e:
                 self.log(f"[ERROR] 로그인 오류: {e}")
-                if attempt < MAX_RETRIES - 1:
+                if attempt < config.MAX_RETRIES - 1:
                     self._reset_session()
                     time.sleep(random.uniform(0.5, 1.5))
 
@@ -190,7 +179,7 @@ class TennisReservationHTTP:
 
     def get_reservation_page(self, court_number, year, month, day):
         """예약 페이지 조회 (재시도 포함) - GET URL 파라미터 방식"""
-        court_value = COURT_VALUE_MAP.get(court_number)
+        court_value = config.COURT_VALUE_MAP.get(court_number)
         if not court_value:
             self.log(f"[ERROR] 잘못된 코트 번호: {court_number}")
             return None
@@ -207,7 +196,7 @@ class TennisReservationHTTP:
         try:
             resp = self._request_with_retry(
                 "GET", config.TENNIS_RESERVATION_URL,
-                params=params, max_retries=MAX_RETRIES
+                params=params, max_retries=config.MAX_RETRIES
             )
             return resp.text
 
@@ -268,7 +257,7 @@ class TennisReservationHTTP:
             self.log("[TEST] 테스트 모드 - 실제 신청하지 않음")
             return True, "테스트 모드 - 신청 건너뜀"
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(config.MAX_RETRIES):
             try:
                 # Step 1: 예약 페이지에서 DocumentForm 필드 가져오기
                 html = self.get_reservation_page(court_number, year, month, day)
@@ -298,7 +287,7 @@ class TennisReservationHTTP:
                             form_data[name] = selected.get("value", "")
 
                 # place_opt 강제 설정 (코트 번호)
-                court_value = COURT_VALUE_MAP.get(court_number)
+                court_value = config.COURT_VALUE_MAP.get(court_number)
                 form_data["place_opt"] = court_value
 
                 # 선택한 시간 추가
@@ -378,82 +367,11 @@ class TennisReservationHTTP:
                     return True, "예약 제출 완료"
 
             except Exception as e:
-                self.log(f"[RETRY {attempt+1}/{MAX_RETRIES}] 예약 신청 오류: {e}")
-                if attempt < MAX_RETRIES - 1:
+                self.log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 신청 오류: {e}")
+                if attempt < config.MAX_RETRIES - 1:
                     time.sleep(random.uniform(0.1, 0.5))
 
         return False, "예약 신청 실패 (재시도 초과)"
-
-    def _handle_popup_form(self, html_content, test_mode=False):
-        """팝업 폼 처리 (사용허가 신청서) - rent_period_proc.php로 최종 제출"""
-        try:
-            soup = BeautifulSoup(html_content, "html.parser")
-            form = soup.find("form", {"name": "useForm"})
-
-            if not form:
-                self.log("[WARN] 신청서 폼을 찾을 수 없음")
-                return False, "신청서 폼 없음"
-
-            # useForm의 모든 필드 수집
-            form_data = {}
-            for inp in form.find_all(["input", "textarea"]):
-                name = inp.get("name")
-                if name:
-                    value = inp.get("value", "")
-                    # textarea는 text content 사용
-                    if inp.name == "textarea":
-                        value = inp.get_text()
-                    form_data[name] = value
-
-            # 시간 정보 추출 (rent_chk[] 값에서)
-            rent_chk = form_data.get("rent_chk[]", "")
-            if len(rent_chk) >= 8:
-                stime = rent_chk[:2]
-                etime = rent_chk[4:6]
-                form_data["stime"] = stime
-                form_data["etime"] = etime
-                form_data["rent_stime"] = rent_chk[:4]
-                form_data["rent_etime"] = rent_chk[4:8]
-
-            # 동의 체크 추가
-            form_data["apply_chk2"] = "1"
-            form_data["apply_chk"] = "1"
-
-            # 필수 필드 기본값 설정
-            if not form_data.get("com_nm"):
-                form_data["com_nm"] = "개인"
-            form_data["regno"] = "0000000000000"
-
-            self.log(f"[INFO] 신청서 데이터: rent_chk={rent_chk}, stime={form_data.get('stime')}")
-
-            if test_mode:
-                self.log("[TEST] 테스트 모드 - 최종 신청 건너뜀")
-                return True, "테스트 모드 - 최종 신청 건너뜀"
-
-            # 최종 제출: rent_period_proc.php
-            submit_url = urljoin(config.MAIN_URL, "/rent/rent_period_proc.php")
-            self.log(f"[INFO] 최종 제출: {submit_url}")
-
-            resp = self._request_with_retry(
-                "POST", submit_url,
-                data=form_data, max_retries=5
-            )
-
-            # 결과 확인
-            if "신청이 완료" in resp.text or ", 0)" in resp.text:
-                self.log("[SUCCESS] 최종 예약 완료!")
-                return True, "최종 예약 완료"
-            elif "이미" in resp.text:
-                self.log("[WARN] 이미 예약된 시간")
-                return False, "이미 예약된 시간"
-            else:
-                # 응답 내용 일부 출력
-                self.log(f"[WARN] 예약 응답 확인 필요")
-                return True, "예약 제출 완료 (확인 필요)"
-
-        except Exception as e:
-            self.log(f"[ERROR] 팝업 처리 오류: {e}")
-            return False, str(e)
 
     def reserve(self, target_date, target_hour, court_number, test_mode=False):
         """예약 실행 (전체 플로우)"""
@@ -467,11 +385,11 @@ class TennisReservationHTTP:
 
             # 예약 페이지 조회 (재시도 포함)
             html = None
-            for attempt in range(MAX_RETRIES):
+            for attempt in range(config.MAX_RETRIES):
                 html = self.get_reservation_page(court_number, year, month, day)
                 if html:
                     break
-                self.log(f"[RETRY {attempt+1}/{MAX_RETRIES}] 예약 페이지 재조회")
+                self.log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 페이지 재조회")
                 time.sleep(random.uniform(0.2, 0.8))
 
             if not html:
@@ -515,118 +433,6 @@ class TennisReservationHTTP:
         """세션 종료"""
         if self.session:
             self.session.close()
-
-
-def wait_before_login():
-    """예약 오픈 10분 전까지 로그인 없이 대기.
-
-    - RESERVATION_DAY == 0: 즉시 통과
-    - 오늘이 예약일이 아닌 경우: 즉시 통과 (기존 검증 함수가 처리)
-    - 남은 시간 > 10분: 10분 전 시각까지 슬립 대기
-    - 남은 시간 <= 10분: 즉시 통과
-    """
-    if config.RESERVATION_DAY == 0:
-        return
-
-    now = datetime.now()
-    if now.day != config.RESERVATION_DAY:
-        return
-
-    target = now.replace(
-        hour=config.RESERVATION_HOUR,
-        minute=config.RESERVATION_MINUTE,
-        second=0,
-        microsecond=0
-    )
-    login_time = target - timedelta(minutes=10)
-    remaining = (login_time - now).total_seconds()
-
-    if remaining <= 0:
-        return
-
-    print(f"[PRE-WAIT] 예약 오픈({target.strftime('%H:%M')})까지 {(target - now).total_seconds():.0f}초 남았습니다.")
-    print(f"[PRE-WAIT] 로그인은 10분 전({login_time.strftime('%H:%M:%S')})부터 시작합니다.")
-
-    while True:
-        now = datetime.now()
-        remaining = (login_time - now).total_seconds()
-        if remaining <= 0:
-            break
-        if remaining > 60:
-            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음 (슬립 중)", end="", flush=True)
-            time.sleep(30)
-        else:
-            print(f"\r[PRE-WAIT] 로그인까지 {remaining:.0f}초 남음", end="", flush=True)
-            time.sleep(1)
-
-    print()
-    print("[INFO] 10분 전 도달. 로그인을 시작합니다.")
-
-
-def wait_for_reservation_open():
-    """예약 오픈 시간까지 대기
-
-    RESERVATION_DAY = 0이면 바로 실행
-    RESERVATION_DAY != 0이면:
-      - 오늘이 예약일과 같으면: 예약 시간까지 대기
-      - 오늘이 예약일보다 크면: 에러 (이미 지남)
-      - 오늘이 예약일보다 작으면: 에러 (아직 예약일이 아님)
-
-    Returns:
-        bool: 성공 시 True, 실행 불가 시 False
-    """
-    # RESERVATION_DAY가 0이면 바로 실행
-    if config.RESERVATION_DAY == 0:
-        print("[INFO] 즉시 실행 모드")
-        return True
-
-    now = datetime.now()
-
-    # 오늘이 예약일인지 확인
-    if now.day != config.RESERVATION_DAY:
-        if now.day > config.RESERVATION_DAY:
-            print(f"[ERROR] 이번 달 예약일({config.RESERVATION_DAY}일)이 이미 지났습니다.")
-            print(f"[ERROR] 오늘은 {now.month}월 {now.day}일입니다.")
-            return False
-        else:
-            print(f"[ERROR] 아직 예약일이 아닙니다.")
-            print(f"[ERROR] 오늘은 {now.month}월 {now.day}일이고, 예약일은 매월 {config.RESERVATION_DAY}일입니다.")
-            return False
-
-    # 예약일이 맞으면 시간 체크
-    target = now.replace(
-        hour=config.RESERVATION_HOUR,
-        minute=config.RESERVATION_MINUTE,
-        second=0,
-        microsecond=0
-    )
-
-    # 이미 시간이 지났으면 바로 진행
-    if now >= target:
-        print(f"[INFO] 예약 시간({config.RESERVATION_HOUR}:{config.RESERVATION_MINUTE:02d})이 지났습니다. 바로 진행합니다.")
-        return True
-
-    wait_seconds = (target - now).total_seconds()
-    print(f"[INFO] 예약 오픈까지 {wait_seconds:.0f}초 남았습니다.")
-    print(f"[INFO] 목표 시간: {target.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # 대기 루프
-    while True:
-        now = datetime.now()
-        remaining = (target - now).total_seconds()
-
-        if remaining <= 0:
-            break
-
-        if remaining > 10:
-            print(f"\r[WAIT] 남은 시간: {remaining:.0f}초", end="", flush=True)
-            time.sleep(1)
-        else:
-            print(f"\r[READY] {remaining:.1f}초 후 시작!", end="", flush=True)
-            time.sleep(0.05)
-
-    print("[GO!] 예약을 시작합니다!")
-    return True
 
 
 def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, courts=None, reservations=None, user_id=None, user_pw=None, wait_for_open=True):
@@ -682,7 +488,7 @@ def run_reservation_http(test_mode=False, dates=None, hours=None, court=None, co
     print(f"총 {len(tasks)}개 예약 작업")
     for i, (d, h, c) in enumerate(tasks):
         print(f"  [{i+1}] {d} {h:02d}:00~{h+2:02d}:00 / {c}번 코트")
-    print(f"설정: 최대 {MAX_RETRIES}회 재시도, 타임아웃 {REQUEST_TIMEOUT}초")
+    print(f"설정: 최대 {config.MAX_RETRIES}회 재시도, 타임아웃 ({config.CONNECTION_TIMEOUT},{config.READ_TIMEOUT})초")
     print()
 
     results = []
@@ -829,10 +635,8 @@ def is_likely_closure(slots):
     (정상 운영일에는 인기 시설이라 일부 예약이 있음)
     """
     if len(slots) >= 8:
-        # 모든 시간대(06, 08, 10, 12, 14, 16, 18, 20)가 비어있는지 확인
         available_hours = set(s["start_hour"] for s in slots)
-        all_hours = {6, 8, 10, 12, 14, 16, 18, 20}
-        if all_hours.issubset(available_hours):
+        if set(config.AVAILABLE_HOURS).issubset(available_hours):
             return True
     return False
 
@@ -853,8 +657,8 @@ def search_available_slots(year, month, courts=None, hours=None, verbose=True, u
     Returns:
         dict: 검색 결과
     """
-    courts = courts or [1, 2, 3, 4]
-    hours = hours or [6, 8, 10]
+    courts = courts or config.ALL_COURTS
+    hours = hours or config.SEARCH_DEFAULT_HOURS
 
     weekends = get_weekends_in_month(year, month)
 
@@ -974,8 +778,8 @@ def search_all_slots(year, month, courts=None, verbose=True, user_id=None, user_
     Returns:
         dict: 검색 결과
     """
-    courts = courts or [1, 2, 3, 4]
-    all_hours = [6, 8, 10, 12, 14, 16, 18, 20]  # 모든 시간대
+    courts = courts or config.ALL_COURTS
+    all_hours = config.AVAILABLE_HOURS
 
     all_days = get_all_days_in_month(year, month)
 
