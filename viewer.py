@@ -391,6 +391,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 .day-num{font-size:12px;font-weight:700;padding:4px 7px 2px;display:flex;justify-content:space-between;align-items:center}
 .day-num .dow-tag{font-size:9px;font-weight:500;color:#94a3b8}
+.day-num-l{display:flex;align-items:center;gap:3px}
+.day-cb{width:11px;height:11px;accent-color:#6366f1;cursor:pointer;margin:0}
 .day-num.sat-n{color:#2563eb}.day-num.sun-n{color:#dc2626}
 
 /* 미니 그리드 (코트×시간) */
@@ -445,6 +447,8 @@ const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]; // config.py AVAILABLE_HOURS�
 let focusedAcct = null;   // 포커스(반전)된 계정 번호
 let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
 let _saveSeq = 0;         // race condition 방지 — 마지막 요청 번호
+let dispatchDays = new Set();      // 재배치 대상 날짜 "YYYY-MM-DD"
+let initializedMonths = new Set(); // 주말 기본 선택을 마친 월 "YYYY-MM"
 
 /* ── 초기화 ── */
 (function init() {
@@ -520,6 +524,25 @@ function changeMonth(d) {
   buildCalendar();
 }
 
+/* ── 재배치 대상 날짜 선택 ── */
+function ensureMonthDefaults() {
+  // 처음 표시하는 월은 토·일을 기본 선택.
+  // 이미 초기화한 월은 건너뛰어 사용자가 해제한 주말이 되살아나지 않게 한다.
+  const mKey = `${CY}-${String(CM).padStart(2,'0')}`;
+  if (initializedMonths.has(mKey)) return;
+  initializedMonths.add(mKey);
+  const lastDay = new Date(CY, CM, 0).getDate();
+  for (let d = 1; d <= lastDay; d++) {
+    const dow = new Date(CY, CM - 1, d).getDay(); // 0=일, 6=토
+    if (dow === 0 || dow === 6)
+      dispatchDays.add(`${mKey}-${String(d).padStart(2,'0')}`);
+  }
+}
+
+function toggleDay(dateStr, on) {
+  on ? dispatchDays.add(dateStr) : dispatchDays.delete(dateStr);
+}
+
 /* ── 슬롯 맵 ── */
 function slotMap() {
   const m = {};
@@ -551,6 +574,7 @@ function slotMap() {
 
 /* ── 달력 렌더링 ── */
 function buildCalendar() {
+  ensureMonthDefaults();
   document.getElementById('tip').classList.remove('show');
   document.getElementById('mtitle').textContent = `${CY}년 ${CM}월`;
   const sm = slotMap();
@@ -577,7 +601,7 @@ function buildCalendar() {
 
     const hasRes = !!cells;
     h += `<div class="day-cell${sat?' is-sat':sun?' is-sun':''}${day===todayD?' is-today':''}">`;
-    h += `<div class="day-num${sat?' sat-n':sun?' sun-n':''}">${day}<span class="dow-tag">${DOW[dow]}</span></div>`;
+    h += `<div class="day-num${sat?' sat-n':sun?' sun-n':''}"><span class="day-num-l"><input type="checkbox" class="day-cb" ${dispatchDays.has(dateStr)?'checked':''} onchange="toggleDay('${dateStr}', this.checked)" title="재배치 대상 포함">${day}</span><span class="dow-tag">${DOW[dow]}</span></div>`;
 
     // 예약 유무와 관계없이 모든 날짜에 미니 그리드 표시
     // 예약 없는 날: no-res 클래스로 흐리게 처리
@@ -754,26 +778,26 @@ function shuffle(arr) {
 
 /* ── 재배치 ── */
 async function redistribute() {
-  // 1. 현재 월 토·일 날짜 수집
-  const weekendDays = [];
-  const lastDay = new Date(CY, CM, 0).getDate();
-  for (let d = 1; d <= lastDay; d++) {
-    const dow = new Date(CY, CM - 1, d).getDay(); // 0=일, 6=토
-    if (dow === 0 || dow === 6) weekendDays.push(d);
-  }
-  if (!weekendDays.length) { showToast('주말 날짜 없음', true); return; }
-  if (!ACCOUNTS.length)    { showToast('계정 없음', true); return; }
+  // 1. 달력에서 체크된 재배치 대상 날짜 수집 (기본: 토·일)
+  ensureMonthDefaults();
+  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
+  const targetDays = [...dispatchDays]
+    .filter(ds => ds.startsWith(pfx))
+    .map(ds => +ds.split('-')[2])
+    .sort((a, b) => a - b);
+  if (!targetDays.length) { showToast('선택된 날짜 없음', true); return; }
+  if (!ACCOUNTS.length)   { showToast('계정 없음', true); return; }
 
   // 2. 슬롯 풀 생성 — 우선순위별 섹션으로 구분
-  //    토(dow=6): 8시 3코트 / 일(dow=0): 8시 4코트
+  //    토(dow=6): 8시 3코트 / 그 외(일·평일): 8시 4코트
   //    6시: 3코트/일 랜덤 / 10시: 1코트/일 랜덤
   const sec8 = [], sec6 = [], sec10 = [];
-  weekendDays.forEach(day => {
-    const ds     = `${CY}-${String(CM).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  targetDays.forEach(day => {
+    const ds     = `${pfx}-${String(day).padStart(2,'0')}`;
     const dow    = new Date(CY, CM - 1, day).getDay();
     const isSat  = dow === 6;
 
-    // 8시: 토 3코트(1→2→3), 일 4코트(1→2→3→4)
+    // 8시: 토 3코트(1→2→3), 그 외 4코트(1→2→3→4)
     const courts8 = isSat ? [1,2,3] : [1,2,3,4];
     courts8.forEach(c => sec8.push({ date: ds, hour: 8,  court: c }));
 
@@ -829,7 +853,7 @@ async function redistribute() {
   // 4. 결과 요약 & 확인
   const totalSlots = assignments.reduce((s, a) => s + a.slots.length, 0);
   const need       = ACCOUNTS.length * 4;
-  let msg = `${CY}년 ${CM}월 주말 ${weekendDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
+  let msg = `${CY}년 ${CM}월 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
   if (totalSlots < need) msg = `⚠ 슬롯 부족 (필요 ${need}개, 가능 ${totalSlots}개)\n` + msg;
   if (!confirm(msg)) return;
 
