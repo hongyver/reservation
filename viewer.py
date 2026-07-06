@@ -19,7 +19,7 @@ import sys
 import threading
 import webbrowser
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -35,6 +35,10 @@ ALL_COURTS = [1, 2, 3, 4]
 
 # ─── .env 업데이트 ───────────────────────────────────────────────────────────
 
+# ThreadingHTTPServer 전환으로 동시 요청이 가능해져 .env 쓰기 경합을 막는다
+_ENV_LOCK = threading.Lock()
+
+
 def update_env_reservations(account_num, slots):
     """.env에서 해당 계정의 RESERVATION_* 라인을 체크된 슬롯으로 교체한다.
 
@@ -43,35 +47,36 @@ def update_env_reservations(account_num, slots):
 
     Returns: (ok: bool, detail: int|str)
     """
-    env_path = SCRIPT_DIR / ".env"
-    if not env_path.exists():
-        return False, ".env 파일 없음"
+    with _ENV_LOCK:
+        env_path = SCRIPT_DIR / ".env"
+        if not env_path.exists():
+            return False, ".env 파일 없음"
 
-    original = env_path.read_text(encoding="utf-8")
+        original = env_path.read_text(encoding="utf-8")
 
-    prefix  = f"TENNIS_ACCOUNT_{account_num}_RESERVATION_"
-    pw_key  = f"TENNIS_ACCOUNT_{account_num}_PW="
+        prefix  = f"TENNIS_ACCOUNT_{account_num}_RESERVATION_"
+        pw_key  = f"TENNIS_ACCOUNT_{account_num}_PW="
 
-    lines = original.splitlines(keepends=True)
-    lines = [l for l in lines if not l.strip().startswith(prefix)]
+        lines = original.splitlines(keepends=True)
+        lines = [l for l in lines if not l.strip().startswith(prefix)]
 
-    insert_idx = next(
-        (i + 1 for i, l in enumerate(lines) if l.strip().startswith(pw_key)),
-        None,
-    )
-    if insert_idx is None:
-        return False, f"계정 {account_num} PW 라인 미발견"
+        insert_idx = next(
+            (i + 1 for i, l in enumerate(lines) if l.strip().startswith(pw_key)),
+            None,
+        )
+        if insert_idx is None:
+            return False, f"계정 {account_num} PW 라인 미발견"
 
-    sorted_slots = sorted(slots, key=lambda s: (s["date"], s["hour"], s["court"]))
-    new_lines = [
-        f"TENNIS_ACCOUNT_{account_num}_RESERVATION_{i+1}="
-        f"{s['date']}:{s['hour']}:{s['court']}\n"
-        for i, s in enumerate(sorted_slots)
-    ]
-    lines[insert_idx:insert_idx] = new_lines
+        sorted_slots = sorted(slots, key=lambda s: (s["date"], s["hour"], s["court"]))
+        new_lines = [
+            f"TENNIS_ACCOUNT_{account_num}_RESERVATION_{i+1}="
+            f"{s['date']}:{s['hour']}:{s['court']}\n"
+            for i, s in enumerate(sorted_slots)
+        ]
+        lines[insert_idx:insert_idx] = new_lines
 
-    env_path.write_text("".join(lines), encoding="utf-8")
-    return True, len(sorted_slots)
+        env_path.write_text("".join(lines), encoding="utf-8")
+        return True, len(sorted_slots)
 
 
 def update_env_login_advance(minutes):
@@ -89,28 +94,29 @@ def update_env_login_advance(minutes):
     if not (1 <= minutes <= 120):
         return False, f"허용 범위(1~120) 초과: {minutes}"
 
-    env_path = SCRIPT_DIR / ".env"
-    if not env_path.exists():
-        return False, ".env 파일 없음"
+    with _ENV_LOCK:
+        env_path = SCRIPT_DIR / ".env"
+        if not env_path.exists():
+            return False, ".env 파일 없음"
 
-    key      = "TENNIS_LOGIN_ADVANCE_MINUTES"
-    new_line = f"{key}={minutes}\n"
-    lines    = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        key      = "TENNIS_LOGIN_ADVANCE_MINUTES"
+        new_line = f"{key}={minutes}\n"
+        lines    = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
 
-    for i, l in enumerate(lines):
-        if l.strip().startswith(key + "="):
-            lines[i] = new_line
-            break
-    else:
-        insert_idx = next(
-            (i + 1 for i, l in enumerate(lines)
-             if l.strip().startswith("TENNIS_RESERVATION_MINUTE=")),
-            len(lines),
-        )
-        lines[insert_idx:insert_idx] = [new_line]
+        for i, l in enumerate(lines):
+            if l.strip().startswith(key + "="):
+                lines[i] = new_line
+                break
+        else:
+            insert_idx = next(
+                (i + 1 for i, l in enumerate(lines)
+                 if l.strip().startswith("TENNIS_RESERVATION_MINUTE=")),
+                len(lines),
+            )
+            lines[insert_idx:insert_idx] = [new_line]
 
-    env_path.write_text("".join(lines), encoding="utf-8")
-    return True, minutes
+        env_path.write_text("".join(lines), encoding="utf-8")
+        return True, minutes
 
 
 def backup_env():
@@ -227,6 +233,25 @@ class _APIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
 
+        elif self.path == "/api/search":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            dates  = body.get("dates") or []
+            if not dates:
+                result = {"ok": False, "error": "날짜 없음"}
+            else:
+                try:
+                    result = search_dates_availability(dates)
+                except Exception as e:
+                    result = {"ok": False, "error": str(e)}
+            payload = json.dumps(result, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(payload))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(payload)
+
         elif self.path == "/api/save-login-advance":
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
@@ -244,7 +269,8 @@ def start_api_server():
     """사용 가능한 포트를 찾아 백그라운드 HTTP API 서버를 시작한다."""
     for port in range(8765, 8800):
         try:
-            server = HTTPServer(("127.0.0.1", port), _APIHandler)
+            # 검색처럼 오래 걸리는 요청이 저장·페이지 로드를 막지 않도록 스레드 처리
+            server = ThreadingHTTPServer(("127.0.0.1", port), _APIHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             return server, port
@@ -337,6 +363,78 @@ def get_initial_month(accounts):
     return n.year, n.month
 
 
+# ─── 빈자리 검색 ──────────────────────────────────────────────────────────────
+
+VIEWER_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]  # config.AVAILABLE_HOURS와 동일
+
+
+def search_dates_availability(dates):
+    """선택된 날짜들의 코트별 빈자리를 병렬 조회한다 (읽기 전용, 예약 안 함).
+
+    첫 번째 계정으로 로그인 1회 → 날짜×코트 페이지를 Semaphore(4)로 병렬 조회.
+    어느 한 코트라도 휴장일 패턴이면 해당 날짜 전체를 휴장으로 처리한다.
+
+    Returns: {"ok", "results", "closed_dates", "searched_dates", "elapsed"}
+             실패 시 {"ok": False, "error": str}
+    """
+    import asyncio
+    import time
+
+    from reservation_async import TennisReservationAsync, is_likely_closure
+
+    accounts = load_data()
+    if not accounts:
+        return {"ok": False, "error": "계정 없음"}
+    cred = accounts[0]
+    t0 = time.time()
+
+    async def _run():
+        async with TennisReservationAsync() as bot:
+            if not await bot.login(cred["user_id"], cred["user_pw"]):
+                return {"ok": False, "error": "로그인 실패"}
+
+            sem = asyncio.Semaphore(4)
+
+            async def fetch(date_str, court):
+                y, m, d = (int(x) for x in date_str.split("-"))
+                async with sem:
+                    html = await bot.get_reservation_page(court, y, m, d)
+                    await asyncio.sleep(0.05)  # 서버 부하 완화
+                return date_str, court, html
+
+            pages = await asyncio.gather(
+                *(fetch(ds, c) for ds in dates for c in ALL_COURTS)
+            )
+
+            closed = set()
+            slots_by_key = {}
+            for date_str, court, html in pages:
+                if not html:
+                    continue
+                slots = bot.get_available_slots(html)
+                if is_likely_closure(slots):
+                    closed.add(date_str)
+                slots_by_key[(date_str, court)] = slots
+
+            results = [
+                {"date": ds, "court": c, "hour": s["start_hour"]}
+                for (ds, c), slots in sorted(slots_by_key.items())
+                if ds not in closed
+                for s in slots
+                if s["start_hour"] in VIEWER_HOURS
+            ]
+            results.sort(key=lambda r: (r["date"], r["hour"], r["court"]))
+            return {
+                "ok": True,
+                "results": results,
+                "closed_dates": sorted(closed),
+                "searched_dates": sorted(dates),
+                "elapsed": round(time.time() - t0, 1),
+            }
+
+    return asyncio.run(_run())
+
+
 # ─── HTML 생성 ────────────────────────────────────────────────────────────────
 
 _CSS = """
@@ -350,9 +448,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .hdr-info{font-size:12px;font-weight:600;color:#cbd5e1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px}
 .hdr-num{width:46px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:4px;color:#fff;font-size:12px;font-weight:700;text-align:center;padding:2px 4px;outline:none}
 .hdr-num:focus{border-color:rgba(255,255,255,.6);background:rgba(255,255,255,.2)}
+
+/* 헤더 모드 토글 (배치/검색) */
+.mode-seg{display:flex;border:1px solid rgba(255,255,255,.3);border-radius:7px;overflow:hidden;margin:0 4px}
+.mode-seg .seg{border:none!important;border-radius:0!important;background:transparent;padding:5px 11px;font-size:12px;cursor:pointer;color:#cbd5e1;transition:background .15s;white-space:nowrap}
+.mode-seg .seg:hover{background:rgba(255,255,255,.12)}
+#modeDispatch.on{background:#6366f1!important;color:#fff;font-weight:700}
+#modeSearch.on{background:#16a34a!important;color:#fff;font-weight:700}
 .header-btns{display:flex;gap:6px;align-items:center}
 .header-btns button{padding:5px 12px;border:1px solid rgba(255,255,255,.25);border-radius:6px;background:transparent;color:#fff;cursor:pointer;font-size:12px;transition:background .15s}
 .header-btns button:hover{background:rgba(255,255,255,.12)}
+.header-btns button:disabled{opacity:.25;cursor:not-allowed}
+.header-btns button:disabled:hover{background:transparent}
 .layout{display:flex;flex:1;overflow:hidden}
 
 .sidebar{width:220px;min-width:220px;background:#fff;border-right:1px solid #e2e8f0;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:4px}
@@ -374,9 +481,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* 달력 영역 */
 .cal-area{flex:1;overflow:auto;padding:14px}
 .month-nav{display:flex;align-items:center;gap:12px;margin-bottom:12px}
-.month-nav button{width:30px;height:30px;border:1px solid #e2e8f0;border-radius:7px;background:#fff;cursor:pointer;font-size:14px;transition:background .15s}
-.month-nav button:hover{background:#f8fafc}
+.month-nav > button{width:30px;height:30px;border:1px solid #e2e8f0;border-radius:7px;background:#fff;cursor:pointer;font-size:14px;transition:background .15s}
+.month-nav > button:hover{background:#f8fafc}
 .month-title{font-size:17px;font-weight:700;min-width:110px;text-align:center}
+
+/* 일괄 날짜 선택 */
+.quick-days{display:flex;gap:4px;margin-left:6px}
+.quick-days button{padding:5px 10px;font-size:11px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;cursor:pointer;color:#475569;transition:background .15s;white-space:nowrap}
+.quick-days button:hover{background:#f8fafc}
 
 /* 달력 그리드 */
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
@@ -393,6 +505,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .day-num .dow-tag{font-size:9px;font-weight:500;color:#94a3b8}
 .day-num-l{display:flex;align-items:center;gap:3px}
 .day-cb{width:11px;height:11px;accent-color:#6366f1;cursor:pointer;margin:0}
+.mode-search .day-cb{accent-color:#16a34a}
+.closed-badge{font-size:8px;font-weight:700;color:#dc2626;background:#fee2e2;border-radius:4px;padding:1px 3px;line-height:1}
 .day-num.sat-n{color:#2563eb}.day-num.sun-n{color:#dc2626}
 
 /* 미니 그리드 (코트×시간) */
@@ -407,6 +521,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .slot.booked{color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.35)}
 .slot.dup{background:#fef3c7!important;border:1.5px solid #f59e0b!important;color:#92400e;flex-direction:column;font-size:7px;gap:0;line-height:1.1}
 .slot.dimmed{opacity:.08!important;pointer-events:none}
+.slot.avail{background:#dcfce7;border:1.5px solid #22c55e;color:#16a34a}
+.slot.taken{background:#f8fafc;border:1px dashed #e2e8f0;color:#cbd5e1}
 .mini.no-res{opacity:.28}
 .mini.no-res .slot{cursor:default}
 .mini.no-res .slot:hover{transform:none}
@@ -424,6 +540,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .leg-empty{background:#f1f5f9;border:1px dashed #cbd5e1}
 .leg-booked{background:#3b82f6}
 .leg-dup{background:#fef3c7;border:1.5px solid #f59e0b}
+.leg-avail{background:#dcfce7;border:1.5px solid #22c55e}
+.leg-taken{background:#f8fafc;border:1px dashed #e2e8f0}
 /* ── 포커스 반전 ── */
 .acct-card.fc{background:var(--c)!important;border-color:var(--c)!important}
 .acct-card.fc .acct-id,.acct-card.fc .acct-num,.acct-card.fc .acct-r3{color:#fff!important}
@@ -447,8 +565,14 @@ const ALL_HOURS = [6, 8, 10, 12, 14, 16, 18, 20]; // config.py AVAILABLE_HOURS�
 let focusedAcct = null;   // 포커스(반전)된 계정 번호
 let checkedSlots = new Set(); // 체크된 슬롯 키 "날짜:시간:코트"
 let _saveSeq = 0;         // race condition 방지 — 마지막 요청 번호
-let dispatchDays = new Set();      // 재배치 대상 날짜 "YYYY-MM-DD"
+let dispatchDays = new Set();      // 배치 모드 선택 날짜 "YYYY-MM-DD" — 재배치(.env)에만 사용
+let searchDays = new Set();        // 검색 모드 선택 날짜 "YYYY-MM-DD" — 빈자리 검색에만 사용
+let selMode = 'dispatch';          // 날짜 체크박스가 편집하는 대상: 'dispatch' | 'search'
 let initializedMonths = new Set(); // 주말 기본 선택을 마친 월 "YYYY-MM"
+let availSlots = new Set();        // 검색 결과 빈자리 "YYYY-MM-DD:시간:코트"
+let closedDates = new Set();       // 휴장일 추정 날짜 "YYYY-MM-DD"
+let searchedDates = new Set();     // 검색을 수행한 날짜 "YYYY-MM-DD"
+let searching = false;             // 검색 진행 중 플래그
 
 /* ── 초기화 ── */
 (function init() {
@@ -460,6 +584,7 @@ let initializedMonths = new Set(); // 주말 기본 선택을 마친 월 "YYYY-M
     const n = new Date(); CY = n.getFullYear(); CM = n.getMonth() + 1;
   }
   buildSidebar();
+  updateModeButtons();
   buildCalendar();
 })();
 
@@ -524,9 +649,13 @@ function changeMonth(d) {
   buildCalendar();
 }
 
-/* ── 재배치 대상 날짜 선택 ── */
+/* ── 대상 날짜 선택 (배치/검색 모드별 독립) ── */
+function modeDays() {
+  return selMode === 'search' ? searchDays : dispatchDays;
+}
+
 function ensureMonthDefaults() {
-  // 처음 표시하는 월은 토·일을 기본 선택.
+  // 처음 표시하는 월은 두 모드 모두 토·일을 기본 선택.
   // 이미 초기화한 월은 건너뛰어 사용자가 해제한 주말이 되살아나지 않게 한다.
   const mKey = `${CY}-${String(CM).padStart(2,'0')}`;
   if (initializedMonths.has(mKey)) return;
@@ -534,13 +663,50 @@ function ensureMonthDefaults() {
   const lastDay = new Date(CY, CM, 0).getDate();
   for (let d = 1; d <= lastDay; d++) {
     const dow = new Date(CY, CM - 1, d).getDay(); // 0=일, 6=토
-    if (dow === 0 || dow === 6)
-      dispatchDays.add(`${mKey}-${String(d).padStart(2,'0')}`);
+    if (dow === 0 || dow === 6) {
+      const ds = `${mKey}-${String(d).padStart(2,'0')}`;
+      dispatchDays.add(ds);
+      searchDays.add(ds);
+    }
   }
 }
 
 function toggleDay(dateStr, on) {
-  on ? dispatchDays.add(dateStr) : dispatchDays.delete(dateStr);
+  on ? modeDays().add(dateStr) : modeDays().delete(dateStr);
+}
+
+function setMode(m) {
+  selMode = m;
+  document.getElementById('modeDispatch').classList.toggle('on', m === 'dispatch');
+  document.getElementById('modeSearch').classList.toggle('on', m === 'search');
+  updateModeButtons();
+  buildCalendar();
+}
+
+function updateModeButtons() {
+  // 활성 모드에서 사용 가능한 버튼만 enable
+  // 배치 모드: 계정 전체 선택/해제, 재배치 | 검색 모드: 검색
+  const dispatch = selMode === 'dispatch';
+  document.getElementById('btnSelAll').disabled   = !dispatch;
+  document.getElementById('btnDeselAll').disabled = !dispatch;
+  document.getElementById('redistBtn').disabled   = !dispatch;
+  document.getElementById('searchBtn').disabled   = dispatch || searching;
+}
+
+function quickDays(kind) {
+  // 활성 모드의 현재 월 선택을 일괄 재설정: weekend | weekday | all | none
+  ensureMonthDefaults();
+  const days = modeDays();
+  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
+  const lastDay = new Date(CY, CM, 0).getDate();
+  for (let d = 1; d <= lastDay; d++) {
+    const ds = `${pfx}-${String(d).padStart(2,'0')}`;
+    const dow = new Date(CY, CM - 1, d).getDay();
+    const wk = dow === 0 || dow === 6;
+    const on = kind === 'all' || (kind === 'weekend' && wk) || (kind === 'weekday' && !wk);
+    on ? days.add(ds) : days.delete(ds);
+  }
+  buildCalendar();
 }
 
 /* ── 슬롯 맵 ── */
@@ -585,7 +751,7 @@ function buildCalendar() {
   const lastDay  = new Date(CY, CM, 0).getDate();
 
   const DOW = ['월','화','수','목','금','토','일'];
-  let h = '<div class="cal-grid">';
+  let h = `<div class="cal-grid${selMode === 'search' ? ' mode-search' : ''}">`;
   DOW.forEach((d,i) => h += `<div class="dow-hd ${i===5?'sat':i===6?'sun':''}">${d}</div>`);
 
   // 앞 빈 셀
@@ -601,11 +767,13 @@ function buildCalendar() {
 
     const hasRes = !!cells;
     h += `<div class="day-cell${sat?' is-sat':sun?' is-sun':''}${day===todayD?' is-today':''}">`;
-    h += `<div class="day-num${sat?' sat-n':sun?' sun-n':''}"><span class="day-num-l"><input type="checkbox" class="day-cb" ${dispatchDays.has(dateStr)?'checked':''} onchange="toggleDay('${dateStr}', this.checked)" title="재배치 대상 포함">${day}</span><span class="dow-tag">${DOW[dow]}</span></div>`;
+    const cbTitle = selMode === 'search' ? '검색 대상 포함' : '배치 대상 포함';
+    const closedBadge = closedDates.has(dateStr) ? '<span class="closed-badge">휴장</span>' : '';
+    h += `<div class="day-num${sat?' sat-n':sun?' sun-n':''}"><span class="day-num-l"><input type="checkbox" class="day-cb" ${modeDays().has(dateStr)?'checked':''} onchange="toggleDay('${dateStr}', this.checked)" title="${cbTitle}">${day}${closedBadge}</span><span class="dow-tag">${DOW[dow]}</span></div>`;
 
     // 예약 유무와 관계없이 모든 날짜에 미니 그리드 표시
-    // 예약 없는 날: no-res 클래스로 흐리게 처리
-    h += `<div class="mini${hasRes ? '' : ' no-res'}" style="grid-template-columns:${colCss}">`;
+    // 예약 없는 날: no-res 클래스로 흐리게 처리 (검색한 날짜는 결과 표시를 위해 제외)
+    h += `<div class="mini${hasRes || searchedDates.has(dateStr) ? '' : ' no-res'}" style="grid-template-columns:${colCss}">`;
     h += '<div></div>'; // 시간 레이블 자리
     [1,2,3,4].forEach(c => h += `<div class="ct-hd">C${c}</div>`);
     ALL_HOURS.forEach(hr => {
@@ -753,6 +921,15 @@ function makeSlot(accts, dateStr, hr, ct) {
   const oc = `onclick="clickSlot(this,'${dateStr}',${hr},${ct})"`;
 
   if (!accts.length) {
+    // 검색 결과 오버레이: 빈자리 ○(초록) / 검색했지만 빈자리 아님 ×(마감)
+    const key = `${dateStr}:${hr}:${ct}`;
+    if (availSlots.has(key)) {
+      const tip = encodeURIComponent(`빈자리 (검색)\n${dateStr} ${timeStr}\n코트 ${ct}`);
+      return `<div class="slot empty avail" data-a="[]" data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}>○</div>`;
+    }
+    if (searchedDates.has(dateStr) && !closedDates.has(dateStr)) {
+      return `<div class="slot empty taken" data-a="[]" data-d="${dateStr}" data-h="${hr}" data-c="${ct}" ${oc}>×</div>`;
+    }
     return `<div class="slot empty" data-a="[]" data-d="${dateStr}" data-h="${hr}" data-c="${ct}" ${oc}>□</div>`;
   }
   if (accts.length === 1) {
@@ -853,7 +1030,7 @@ async function redistribute() {
   // 4. 결과 요약 & 확인
   const totalSlots = assignments.reduce((s, a) => s + a.slots.length, 0);
   const need       = ACCOUNTS.length * 4;
-  let msg = `${CY}년 ${CM}월 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
+  let msg = `${CY}년 ${CM}월 배치 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
   if (totalSlots < need) msg = `⚠ 슬롯 부족 (필요 ${need}개, 가능 ${totalSlots}개)\n` + msg;
   if (!confirm(msg)) return;
 
@@ -877,6 +1054,48 @@ async function redistribute() {
     }
   } catch (e) {
     showToast('✗ 연결 오류', true);
+  }
+}
+
+/* ── 빈자리 검색 ── */
+async function runSearch() {
+  if (searching) return;
+  ensureMonthDefaults();
+  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
+  const dates = [...searchDays].filter(ds => ds.startsWith(pfx)).sort();
+  if (!dates.length) { showToast('선택된 날짜 없음', true); return; }
+
+  searching = true;
+  const btn = document.getElementById('searchBtn');
+  const orig = btn.textContent;
+  btn.textContent = `⏳ ${dates.length}일 검색 중…`;
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates }),
+    });
+    const r = await resp.json();
+    if (r.ok) {
+      // 같은 날짜의 이전 결과를 지우고 최신 결과로 교체 (날짜 단위 병합)
+      const fresh = new Set(r.searched_dates);
+      availSlots = new Set([...availSlots].filter(k => !fresh.has(k.slice(0, 10))));
+      r.results.forEach(s => availSlots.add(`${s.date}:${s.hour}:${s.court}`));
+      fresh.forEach(d => { searchedDates.add(d); closedDates.delete(d); });
+      (r.closed_dates || []).forEach(d => closedDates.add(d));
+      buildCalendar();
+      const closedMsg = r.closed_dates?.length ? ` (휴장 ${r.closed_dates.length}일)` : '';
+      showToast(`✓ ${r.searched_dates.length}일 검색 — 빈자리 ${r.results.length}건${closedMsg}, ${r.elapsed}초`);
+    } else {
+      showToast('✗ 검색 실패: ' + (r.error || ''), true);
+    }
+  } catch (e) {
+    showToast('✗ 연결 오류', true);
+  } finally {
+    searching = false;
+    btn.textContent = orig;
+    updateModeButtons();  // 검색 중 모드를 바꿨어도 올바른 enable 상태로 복원
   }
 }
 
@@ -922,9 +1141,14 @@ def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
     <h1>🎾 고양시 테니스장 예약 현황</h1>
     <div class="header-btns">
       <span class="hdr-info">⏱ 오픈 <input id="loginAdv" type="number" min="1" max="120" value="{login_adv}" class="hdr-num" onchange="saveLoginAdvance(this)">분 전 로그인 시작</span>
-      <button onclick="selectAll(true)">전체 선택</button>
-      <button onclick="selectAll(false)">전체 해제</button>
-      <button onclick="redistribute()" style="background:rgba(99,102,241,.35);border-color:rgba(99,102,241,.7)">🔀 재배치</button>
+      <div class="mode-seg">
+        <button id="modeDispatch" class="seg on" onclick="setMode('dispatch')">🔀 배치 모드</button>
+        <button id="modeSearch" class="seg" onclick="setMode('search')">🔍 검색 모드</button>
+      </div>
+      <button id="btnSelAll" onclick="selectAll(true)">계정 전체 선택</button>
+      <button id="btnDeselAll" onclick="selectAll(false)">계정 전체 해제</button>
+      <button id="searchBtn" onclick="runSearch()" style="background:rgba(22,163,74,.35);border-color:rgba(22,163,74,.7)">🔍 검색</button>
+      <button id="redistBtn" onclick="redistribute()" style="background:rgba(99,102,241,.35);border-color:rgba(99,102,241,.7)">🔀 재배치</button>
     </div>
   </header>
   <div class="layout">
@@ -934,12 +1158,20 @@ def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
         <button onclick="changeMonth(-1)">◀</button>
         <span class="month-title" id="mtitle"></span>
         <button onclick="changeMonth(1)">▶</button>
+        <div class="quick-days">
+          <button onclick="quickDays('weekend')">주말</button>
+          <button onclick="quickDays('weekday')">평일</button>
+          <button onclick="quickDays('all')">전체</button>
+          <button onclick="quickDays('none')">해제</button>
+        </div>
       </div>
       <div id="cal"></div>
       <div class="legend">
         <span class="leg-item"><span class="leg-box leg-empty"></span>빈 슬롯</span>
         <span class="leg-item"><span class="leg-box leg-booked"></span>단일 예약</span>
         <span class="leg-item"><span class="leg-box leg-dup"></span>⚠ 중복</span>
+        <span class="leg-item"><span class="leg-box leg-avail"></span>빈자리(검색)</span>
+        <span class="leg-item"><span class="leg-box leg-taken"></span>마감(검색)</span>
         <span class="leg-item" style="color:#94a3b8">ID 클릭 → 반전 &nbsp;|&nbsp; 슬롯 클릭 → 체크 → 💾 저장</span>
       </div>
     </main>
