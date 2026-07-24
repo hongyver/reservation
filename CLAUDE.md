@@ -161,6 +161,7 @@ TENNIS_USER_PW=비밀번호
 - `MAX_CONCURRENT`: 병렬 예약 동시 세션 수
 - `MAX_RETRIES`: 접속 폭주 시 재시도 횟수 (기본 10)
 - `LOGIN_ADVANCE_MINUTES` / `TENNIS_LOGIN_ADVANCE_MINUTES`: 예약 오픈 N분 전에 로그인 시작 (기본 10분)
+- `SLOTS_PER_ACCOUNT` / `TENNIS_SLOTS_PER_ACCOUNT`: 뷰어 재배치 시 계정당 배정 슬롯 수 (기본 4, 범위 1~10)
 
 ## API 서버 엔드포인트
 
@@ -233,14 +234,23 @@ python3 viewer.py 2026 7   # 특정 월 지정
 - **실시간 저장**: 슬롯 클릭 → 즉시 `POST /api/save-slots` → `.env` 업데이트
 - **중복 표시**: 같은 슬롯에 여러 계정 예약 시 황색 ⚠ 표시 + 툴팁
 - **PW 마스킹**: 👁 버튼으로 토글
+- **재배치** (배치 모드): 체크된 날짜(기본 주말)의 슬롯 풀을 전 계정에 계정당 N개씩 자동 배정
+  - 계정당 개수는 헤더의 "👤 계정당 N개 배정" 입력으로 조정 (`.env`의 `TENNIS_SLOTS_PER_ACCOUNT`에 저장, 기본 4)
+  - 하드 제약: 동일 날짜+코트 중복 금지 / 소프트 제약: 동일 날짜+시간 중복 회피 (2-패스)
+- **빈자리 검색** (검색 모드): 체크된 날짜의 실제 예약 가능 여부를 사이트에서 조회하여 달력에 표시
+- **헤더 설정**: 로그인 시작 시점(분)·계정당 배정 개수 입력 → 변경 즉시 `.env`에 저장
 
 ### 내장 HTTP 서버
 
 `viewer.py`는 Python 내장 `http.server`로 로컬 HTTP 서버를 실행한다.
 
-- `GET /` → HTML 페이지 서빙 (same-origin, CORS 없음)
+- `GET /` → HTML 페이지 서빙 (same-origin, CORS 없음, 매 요청마다 최신 `.env`로 재빌드)
 - `POST /api/save-slots` → `.env` 예약 라인 교체 (날짜→시간→코트 정렬)
   - 저장 전 `.env.bak` 자동 백업
   - 저장 후 최신 accounts JSON 반환 → 브라우저 `ACCOUNTS` in-place 갱신
+- `POST /api/redistribute` → 재배치 결과 일괄 저장 (전 계정 예약 교체)
+- `POST /api/search` → 날짜별 빈자리 조회 (사이트 실시간 조회)
+- `POST /api/save-login-advance` → `TENNIS_LOGIN_ADVANCE_MINUTES` 저장
+- `POST /api/save-slots-per-account` → `TENNIS_SLOTS_PER_ACCOUNT` 저장
 
 포트: 8765~8799 범위에서 사용 가능한 포트 자동 탐색.

@@ -79,28 +79,27 @@ def update_env_reservations(account_num, slots):
         return True, len(sorted_slots)
 
 
-def update_env_login_advance(minutes):
-    """`.env`의 TENNIS_LOGIN_ADVANCE_MINUTES 값을 교체한다.
+def _update_env_int(key, value, lo, hi, anchor_key):
+    """`.env`의 정수형 키 값을 교체한다.
 
     - 키가 있으면 해당 라인 교체
-    - 없으면 TENNIS_RESERVATION_MINUTE 라인 다음(없으면 파일 끝)에 추가
+    - 없으면 anchor_key 라인 다음(없으면 파일 끝)에 추가
 
     Returns: (ok: bool, detail: int|str)
     """
     try:
-        minutes = int(minutes)
+        value = int(value)
     except (TypeError, ValueError):
-        return False, f"정수가 아님: {minutes!r}"
-    if not (1 <= minutes <= 120):
-        return False, f"허용 범위(1~120) 초과: {minutes}"
+        return False, f"정수가 아님: {value!r}"
+    if not (lo <= value <= hi):
+        return False, f"허용 범위({lo}~{hi}) 초과: {value}"
 
     with _ENV_LOCK:
         env_path = SCRIPT_DIR / ".env"
         if not env_path.exists():
             return False, ".env 파일 없음"
 
-        key      = "TENNIS_LOGIN_ADVANCE_MINUTES"
-        new_line = f"{key}={minutes}\n"
+        new_line = f"{key}={value}\n"
         lines    = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
 
         for i, l in enumerate(lines):
@@ -110,13 +109,25 @@ def update_env_login_advance(minutes):
         else:
             insert_idx = next(
                 (i + 1 for i, l in enumerate(lines)
-                 if l.strip().startswith("TENNIS_RESERVATION_MINUTE=")),
+                 if l.strip().startswith(anchor_key + "=")),
                 len(lines),
             )
             lines[insert_idx:insert_idx] = [new_line]
 
         env_path.write_text("".join(lines), encoding="utf-8")
-        return True, minutes
+        return True, value
+
+
+def update_env_login_advance(minutes):
+    """`.env`의 TENNIS_LOGIN_ADVANCE_MINUTES 값을 교체한다."""
+    return _update_env_int("TENNIS_LOGIN_ADVANCE_MINUTES", minutes, 1, 120,
+                           anchor_key="TENNIS_RESERVATION_MINUTE")
+
+
+def update_env_slots_per_account(count):
+    """`.env`의 TENNIS_SLOTS_PER_ACCOUNT 값을 교체한다."""
+    return _update_env_int("TENNIS_SLOTS_PER_ACCOUNT", count, 1, 10,
+                           anchor_key="TENNIS_LOGIN_ADVANCE_MINUTES")
 
 
 def backup_env():
@@ -264,6 +275,18 @@ class _APIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
 
+        elif self.path == "/api/save-slots-per-account":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            ok, detail = update_env_slots_per_account(body.get("count"))
+            payload = json.dumps({"ok": ok, "detail": detail}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(payload))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(payload)
+
 
 def start_api_server():
     """사용 가능한 포트를 찾아 백그라운드 HTTP API 서버를 시작한다."""
@@ -349,6 +372,7 @@ def load_settings():
     cfg.load_env_file()
     return {
         "login_advance_minutes": cfg.LOGIN_ADVANCE_MINUTES,
+        "slots_per_account":     cfg.SLOTS_PER_ACCOUNT,
     }
 
 
@@ -906,6 +930,25 @@ async function saveLoginAdvance(el) {
   }
 }
 
+/* ── 계정당 배정 슬롯 수 저장 ── */
+async function saveSlotsPerAccount(el) {
+  let v = parseInt(el.value, 10);
+  if (isNaN(v) || v < 1)   v = 1;
+  if (v > 10)              v = 10;
+  el.value = v;  // 정규화된 값으로 표시 복원
+  try {
+    const resp = await fetch('/api/save-slots-per-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: v }),
+    });
+    const { ok, detail } = await resp.json();
+    showToast(ok ? `✓ 계정당 ${detail}개 배정으로 저장됨` : `✗ 저장 실패: ${detail}`, !ok);
+  } catch (e) {
+    showToast('✗ 연결 오류', true);
+  }
+}
+
 function showToast(msg, isError = false) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -988,10 +1031,11 @@ async function redistribute() {
   shuffle(sec8); shuffle(sec6); shuffle(sec10);
   const pool = [...sec8, ...sec6, ...sec10];
 
-  // 3. 계정당 4개 배정
+  // 3. 계정당 N개 배정 (헤더 입력값, .env TENNIS_SLOTS_PER_ACCOUNT)
   //    하드 제약: 동일 날짜+코트 중복 금지
   //    소프트 제약: 동일 날짜+시간 중복 회피 (가급적)
   //    2-패스: 1차(하드+소프트) → 부족 시 2차(하드만)
+  const perAcct = parseInt(document.getElementById('slotsPer').value, 10) || 4;
   const used = new Array(pool.length).fill(false);
   const assignments = ACCOUNTS.map(a => {
     const slots = [];
@@ -999,7 +1043,7 @@ async function redistribute() {
     const assignedDH = new Set(); // 소프트: date:hour
 
     // 1차 패스 — 하드+소프트 모두 적용
-    for (let i = 0; i < pool.length && slots.length < 4; i++) {
+    for (let i = 0; i < pool.length && slots.length < perAcct; i++) {
       if (used[i]) continue;
       const s = pool[i];
       const dcKey = `${s.date}:${s.court}`;
@@ -1013,7 +1057,7 @@ async function redistribute() {
     }
 
     // 2차 패스 — 부족 시 날짜+시간 중복 허용하여 보충
-    for (let i = 0; i < pool.length && slots.length < 4; i++) {
+    for (let i = 0; i < pool.length && slots.length < perAcct; i++) {
       if (used[i]) continue;
       const s = pool[i];
       const dcKey = `${s.date}:${s.court}`;
@@ -1029,7 +1073,7 @@ async function redistribute() {
 
   // 4. 결과 요약 & 확인
   const totalSlots = assignments.reduce((s, a) => s + a.slots.length, 0);
-  const need       = ACCOUNTS.length * 4;
+  const need       = ACCOUNTS.length * perAcct;
   let msg = `${CY}년 ${CM}월 배치 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
   if (totalSlots < need) msg = `⚠ 슬롯 부족 (필요 ${need}개, 가능 ${totalSlots}개)\n` + msg;
   if (!confirm(msg)) return;
@@ -1127,6 +1171,7 @@ function bindTips() {
 def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
     data_json = json.dumps(accounts, ensure_ascii=False)
     login_adv = (settings or {}).get("login_advance_minutes", 10)
+    slots_per = (settings or {}).get("slots_per_account", 4)
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1141,6 +1186,7 @@ def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
     <h1>🎾 고양시 테니스장 예약 현황</h1>
     <div class="header-btns">
       <span class="hdr-info">⏱ 오픈 <input id="loginAdv" type="number" min="1" max="120" value="{login_adv}" class="hdr-num" onchange="saveLoginAdvance(this)">분 전 로그인 시작</span>
+      <span class="hdr-info">👤 계정당 <input id="slotsPer" type="number" min="1" max="10" value="{slots_per}" class="hdr-num" onchange="saveSlotsPerAccount(this)">개 배정</span>
       <div class="mode-seg">
         <button id="modeDispatch" class="seg on" onclick="setMode('dispatch')">🔀 배치 모드</button>
         <button id="modeSearch" class="seg" onclick="setMode('search')">🔍 검색 모드</button>
