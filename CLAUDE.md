@@ -81,13 +81,15 @@ viewer.py            # 예약 현황 달력 뷰어 (HTTP 서버 내장, 실시�
 1. `_build_tasks()` → `.env` 또는 `config.RESERVATION_CONFIG`에서 예약 작업 목록 조립
 2. **Phase 1** — 로그인 전 대기 (`wait_before_login_async`): 오픈 10분 전까지 asyncio.sleep
 3. **Phase 2** — N개 봇 병렬 로그인 (`asyncio.gather`): 각 예약 건마다 독립 세션(PHPSESSID) 생성
-4. **Phase 3** — 오픈 시간 정밀 대기 (`wait_for_reservation_open_async`): 마지막 10초는 10ms 단위
+4. **Phase 3** — 오픈 시간 정밀 대기 (`wait_for_reservation_open_async`): 마지막 10초는 10ms 단위.
+   keepalive 만료 대비로 남은 20초/4초 시점에 전 세션 연결 재예열(warmup) 트리거 (fire-and-forget, 타임아웃 3초)
 5. **Phase 4** — `asyncio.gather` + `Semaphore(MAX_CONCURRENT)`로 동시 예약 실행
 
 각 예약 봇의 내부 흐름:
 1. `get_reservation_page()` → 대상 코트/날짜 페이지 HTML 조회
 2. `get_available_slots()` → BeautifulSoup으로 가능 슬롯 파싱
 3. `submit_reservation()` → 3단계 제출:
+   - 1단계는 `reserve()`가 조회한 페이지 HTML을 재사용해 재조회 생략 (재시도 시에만 재조회)
    - POST `rent_period_apply.php` → `DocumentForm` + `useForm` 필드 수집
    - POST `rent_period_proc.php` → 최종 대관신청
 

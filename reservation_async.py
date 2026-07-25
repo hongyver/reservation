@@ -153,11 +153,21 @@ class TennisReservationAsync:
         self._log("[ERROR] 로그인 최종 실패")
         return False
 
-    async def warmup_connection(self):
-        """연결 예열 (예약 시간 직전 호출)."""
+    async def warmup_connection(self, max_retries=2, total_timeout=None):
+        """연결 예열 (로그인 직후 + 오픈 직전 재예열 호출).
+
+        Args:
+            total_timeout: 요청 전체 타임아웃(초). 오픈 직전 재예열처럼
+                           정각 전에 반드시 끝나야 하는 호출에 짧게 지정.
+        """
         self._log("[INFO] 연결 예열 중...")
+        kwargs = {}
+        if total_timeout is not None:
+            kwargs["timeout"] = aiohttp.ClientTimeout(total=total_timeout)
         try:
-            await self._request_with_retry("GET", config.MAIN_URL, max_retries=2)
+            await self._request_with_retry(
+                "GET", config.MAIN_URL, max_retries=max_retries, **kwargs
+            )
             self._log("[INFO] 연결 예열 완료")
             return True
         except Exception as e:
@@ -209,10 +219,12 @@ class TennisReservationAsync:
         return available
 
     async def submit_reservation(self, court_number, year, month, day,
-                                  time_value, test_mode=False, worker_id=None):
+                                  time_value, test_mode=False, worker_id=None,
+                                  page_html=None):
         """예약 신청 - 3단계 프로세스.
 
         1. get_reservation_page() → DocumentForm 필드 수집
+           (page_html이 주어지면 첫 시도는 재조회 없이 재사용 → 정각 1왕복 절약)
         2. rent_period_apply.php → useForm 사용자 정보 수집
         3. rent_period_proc.php → 최종 제출
         """
@@ -228,7 +240,10 @@ class TennisReservationAsync:
         for attempt in range(config.MAX_RETRIES):
             try:
                 # Step 1: DocumentForm 필드 수집
-                html = await self.get_reservation_page(court_number, year, month, day)
+                if page_html is not None:
+                    html, page_html = page_html, None  # 재시도부터는 재조회
+                else:
+                    html = await self.get_reservation_page(court_number, year, month, day)
                 if not html:
                     continue
 
@@ -369,7 +384,8 @@ class TennisReservationAsync:
 
             success, message = await self.submit_reservation(
                 court_number, dt.year, dt.month, dt.day,
-                target_slot["value"], test_mode, worker_id
+                target_slot["value"], test_mode, worker_id,
+                page_html=html,
             )
 
             if success:
@@ -480,8 +496,17 @@ async def run_reservation_async(
     print(f"[INFO] {len(bots)}개 세션 준비 완료")
 
     # ── Phase 3: 예약 오픈 시간까지 비동기 대기 ──────────────────
+    # 로그인 직후 예열한 연결은 keepalive(클라 30초, 서버 수 초)로 정각 전에
+    # 끊기므로, 대기 루프가 오픈 직전(남은 20초/4초)에 재예열을 트리거한다.
     if wait_for_open:
-        if not await wait_for_reservation_open_async():
+        async def rewarm_all():
+            await asyncio.gather(
+                *[bot.warmup_connection(max_retries=1, total_timeout=3)
+                  for bot, *_ in bots],
+                return_exceptions=True,
+            )
+
+        if not await wait_for_reservation_open_async(warmup=rewarm_all):
             for bot, *_ in bots:
                 await bot.close()
             return {"success": False, "results": [],
