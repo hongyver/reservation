@@ -282,11 +282,12 @@ class TennisReservationAsync:
                     form_data[select["name"]] = selected.get("value", "")
         return form_data
 
-    async def prefetch_form(self, court_number, year, month, day, worker_id=None):
+    async def prefetch_form(self, court_number, year, month, day, worker_id=None,
+                            max_retries=2, total_timeout=8):
         """정각 전에 대상 페이지를 조회해 DocumentForm 필드를 캐시한다.
 
         성공 시 reserve()가 정각에 페이지 GET 없이 apply.php POST부터 시작한다.
-        연결 예열 효과 겸용. 실패해도 정각에 기존 GET 경로로 폴백하므로 무해하다.
+        연결 예열 효과 겸용. 실패해도 기존 캐시·GET 경로 폴백이 있어 무해하다.
         재시도·타임아웃을 짧게 잡아 정각 전에 반드시 끝나게 한다.
         """
         court_value = config.COURT_VALUE_MAP.get(court_number)
@@ -301,7 +302,8 @@ class TennisReservationAsync:
         try:
             html = await self._request_with_retry(
                 "GET", config.TENNIS_RESERVATION_URL, params=params,
-                max_retries=2, timeout=aiohttp.ClientTimeout(total=8),
+                max_retries=max_retries,
+                timeout=aiohttp.ClientTimeout(total=total_timeout),
             )
         except Exception as e:
             self._log(f"[WARN] 폼 프리페치 실패 (정각에 GET 경로로 폴백): {e}", worker_id)
@@ -600,28 +602,34 @@ async def run_reservation_async(
     # ── Phase 3: 예약 오픈 시간까지 비동기 대기 ──────────────────
     # 로그인 직후 예열한 연결은 keepalive(클라 30초, 서버 수 초)로 정각 전에
     # 끊기므로, 대기 루프가 오픈 직전(남은 20초/4초)에 재예열을 트리거한다.
-    # 1차(20초)는 대상 페이지 프리페치로 승격: 연결 예열 + DocumentForm 캐시
-    # → 정각에 GET 생략하고 apply부터 시작. 2차(4초)는 경량 재예열.
+    # 1차(20초): 대상 페이지 프리페치 — 연결 예열 + DocumentForm 캐시
+    # 2차(4초): 같은 대상 페이지 재프리페치 — 연결 재예열 + 캐시 갱신.
+    #   메인 페이지 GET은 프리페치가 만든 PHP 세션 상태(마지막 조회 페이지)를
+    #   덮어쓸 수 있어 쓰지 않는다. 봇별 지터로 동시 핸드셰이크 폭주를 분산한다.
     if wait_for_open:
         rewarm_count = 0
 
-        async def _prefetch(bot, idx, d, c):
+        async def _prefetch(bot, idx, d, c, jitter, **kw):
+            await asyncio.sleep(random.uniform(0, jitter))
             pdt = datetime.strptime(d, "%Y-%m-%d")
-            await bot.prefetch_form(c, pdt.year, pdt.month, pdt.day, worker_id=idx)
+            await bot.prefetch_form(c, pdt.year, pdt.month, pdt.day,
+                                    worker_id=idx, **kw)
 
         async def rewarm_all():
             nonlocal rewarm_count
             rewarm_count += 1
             if rewarm_count == 1:
                 await asyncio.gather(
-                    *[_prefetch(bot, i + 1, d, c)
+                    *[_prefetch(bot, i + 1, d, c, jitter=1.0)
                       for i, (bot, d, h, c) in enumerate(bots)],
                     return_exceptions=True,
                 )
             else:
+                # 실패해도 1차 캐시가 남아 있으므로 짧게 1회만 시도
                 await asyncio.gather(
-                    *[bot.warmup_connection(max_retries=1, total_timeout=3)
-                      for bot, *_ in bots],
+                    *[_prefetch(bot, i + 1, d, c, jitter=0.3,
+                                max_retries=1, total_timeout=3)
+                      for i, (bot, d, h, c) in enumerate(bots)],
                     return_exceptions=True,
                 )
 
@@ -639,6 +647,9 @@ async def run_reservation_async(
         t_queued = time.monotonic()
         async with sem:
             sem_wait_ms = round((time.monotonic() - t_queued) * 1000, 1)
+            # 발사 지터: 동일 IP 동시 폭주로 인한 서버 큐잉·차단 완화
+            if config.FIRE_JITTER_MS > 0:
+                await asyncio.sleep(random.uniform(0, config.FIRE_JITTER_MS / 1000))
             fire_ts = datetime.now().isoformat(timespec="milliseconds")
             t_fire = time.monotonic()
             success, message = False, "예외 발생"

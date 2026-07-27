@@ -87,9 +87,10 @@ viewer.py            # 예약 현황 달력 뷰어 (HTTP 서버 내장, 실시�
 2. **Phase 1** — 로그인 전 대기 (`wait_before_login_async`): 오픈 10분 전까지 asyncio.sleep
 3. **Phase 2** — N개 봇 병렬 로그인 (`asyncio.gather`): 각 예약 건마다 독립 세션(PHPSESSID) 생성
 4. **Phase 3** — 오픈 시간 정밀 대기 (`wait_for_reservation_open_async`): 마지막 10초는 10ms 단위.
-   keepalive 만료 대비로 오픈 직전 2회 warmup 트리거 (fire-and-forget):
-   - 1차(남은 20초): `prefetch_form()` — 대상 페이지 조회로 연결 예열 + `DocumentForm` 필드 캐시
-   - 2차(남은 4초): 경량 재예열 (타임아웃 3초)
+   keepalive 만료 대비로 오픈 직전 2회 warmup 트리거 (fire-and-forget, 봇별 지터로 분산):
+   - 1차(남은 20초): `prefetch_form()` — 대상 페이지 조회로 연결 예열 + `DocumentForm` 필드 캐시 (지터 0~1초)
+   - 2차(남은 4초): 같은 대상 페이지 재프리페치 — 연결 재예열 + 캐시 갱신 (지터 0~0.3초, 타임아웃 3초).
+     메인 페이지 GET은 PHP 세션의 "마지막 조회 페이지" 상태를 덮어쓸 수 있어 쓰지 않는다
 5. **Phase 4** — `asyncio.gather` + `Semaphore(MAX_CONCURRENT)`로 동시 예약 실행
 
 각 예약 봇의 내부 흐름:
@@ -187,6 +188,7 @@ TENNIS_USER_PW=비밀번호
 - `MAX_RETRIES`: 접속 폭주 시 재시도 횟수 (기본 10)
 - `LOGIN_ADVANCE_MINUTES` / `TENNIS_LOGIN_ADVANCE_MINUTES`: 예약 오픈 N분 전에 로그인 시작 (기본 10분)
 - `SLOTS_PER_ACCOUNT` / `TENNIS_SLOTS_PER_ACCOUNT`: 뷰어 재배치 시 계정당 배정 슬롯 수 (기본 4, 범위 1~10)
+- `FIRE_JITTER_MS` / `TENNIS_FIRE_JITTER_MS`: 정각 발사 지터 상한 ms (기본 150, 0=비활성) — 동일 IP 동시 폭주 완화
 
 ## API 서버 엔드포인트
 
@@ -261,7 +263,7 @@ python3 viewer.py 2026 7   # 특정 월 지정
 - **PW 마스킹**: 👁 버튼으로 토글
 - **재배치** (배치 모드): 체크된 날짜(기본 주말)의 슬롯 풀을 전 계정에 계정당 N개씩 자동 배정
   - 계정당 개수는 헤더의 "👤 계정당 N개 배정" 입력으로 조정 (`.env`의 `TENNIS_SLOTS_PER_ACCOUNT`에 저장, 기본 4)
-  - 하드 제약: 동일 날짜+코트 중복 금지 / 소프트 제약: 동일 날짜+시간 중복 회피 (2-패스)
+  - 하드 제약: 동일 날짜 금지 (서버가 계정당 1일 1건만 허용하므로 같은 날짜 2건은 정각에 반드시 1건 실패)
 - **빈자리 검색** (검색 모드): 체크된 날짜의 실제 예약 가능 여부를 사이트에서 조회하여 달력에 표시
 - **헤더 설정**: 로그인 시작 시점(분)·계정당 배정 개수 입력 → 변경 즉시 `.env`에 저장
 

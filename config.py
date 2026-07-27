@@ -156,6 +156,7 @@ AVAILABLE_HOURS       = [6, 8, 10, 12, 14, 16, 18, 20]
 SEARCH_DEFAULT_HOURS  = [6, 8, 10]
 LOGIN_ADVANCE_MINUTES = int(os.environ.get("TENNIS_LOGIN_ADVANCE_MINUTES", 10))  # 예약 오픈 N분 전에 로그인 시작
 SLOTS_PER_ACCOUNT     = int(os.environ.get("TENNIS_SLOTS_PER_ACCOUNT", 4))       # 재배치 시 계정당 배정 슬롯 수
+FIRE_JITTER_MS        = int(os.environ.get("TENNIS_FIRE_JITTER_MS", 150))        # 정각 발사 지터 상한 ms (0=비활성)
 
 # ============================================
 # API 서버 설정

@@ -1032,38 +1032,20 @@ async function redistribute() {
   const pool = [...sec8, ...sec6, ...sec10];
 
   // 3. 계정당 N개 배정 (헤더 입력값, .env TENNIS_SLOTS_PER_ACCOUNT)
-  //    하드 제약: 동일 날짜+코트 중복 금지
-  //    소프트 제약: 동일 날짜+시간 중복 회피 (가급적)
-  //    2-패스: 1차(하드+소프트) → 부족 시 2차(하드만)
+  //    하드 제약: 동일 날짜 금지 — 서버가 계정당 1일 1건만 허용하므로
+  //    같은 계정에 같은 날짜가 배정되면 정각에 한 건은 반드시 실패한다
   const perAcct = parseInt(document.getElementById('slotsPer').value, 10) || 4;
   const used = new Array(pool.length).fill(false);
   const assignments = ACCOUNTS.map(a => {
     const slots = [];
-    const assignedDC = new Set(); // 하드: date:court
-    const assignedDH = new Set(); // 소프트: date:hour
+    const assignedDates = new Set();
 
-    // 1차 패스 — 하드+소프트 모두 적용
     for (let i = 0; i < pool.length && slots.length < perAcct; i++) {
       if (used[i]) continue;
       const s = pool[i];
-      const dcKey = `${s.date}:${s.court}`;
-      const dhKey = `${s.date}:${s.hour}`;
-      if (!assignedDC.has(dcKey) && !assignedDH.has(dhKey)) {
+      if (!assignedDates.has(s.date)) {
         slots.push(s);
-        assignedDC.add(dcKey);
-        assignedDH.add(dhKey);
-        used[i] = true;
-      }
-    }
-
-    // 2차 패스 — 부족 시 날짜+시간 중복 허용하여 보충
-    for (let i = 0; i < pool.length && slots.length < perAcct; i++) {
-      if (used[i]) continue;
-      const s = pool[i];
-      const dcKey = `${s.date}:${s.court}`;
-      if (!assignedDC.has(dcKey)) {
-        slots.push(s);
-        assignedDC.add(dcKey);
+        assignedDates.add(s.date);
         used[i] = true;
       }
     }
