@@ -29,6 +29,18 @@ from utils import wait_before_login_async, wait_for_reservation_open_async
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
 
+def _backoff_delay(attempt):
+    """지수 백오프 + full jitter 대기 시간(초).
+
+    base * 2^attempt 를 상한까지 키운 뒤 [0, 상한] 균등 지터를 적용한다.
+    동시 재시도가 같은 순간에 몰리는 thundering herd를 분산해
+    단일 IP 요청 폭주(서버 IP 차단)를 억제한다.
+    """
+    ceiling = min(config.RETRY_BACKOFF_BASE * (2 ** attempt),
+                  config.RETRY_BACKOFF_MAX)
+    return random.uniform(0, ceiling)
+
+
 def _dump_timing(log_path, record):
     """타이밍 분석 로그를 JSONL로 추가 기록. 실패해도 예약 흐름에 영향 없음."""
     try:
@@ -158,8 +170,7 @@ class TennisReservationAsync:
                 self._log(f"[RETRY {attempt+1}/{max_retries}] 오류: {e}")
 
             if attempt < max_retries - 1:
-                delay = random.uniform(config.RETRY_DELAY_MIN, config.RETRY_DELAY_MAX)
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_backoff_delay(attempt))
 
         raise last_error or Exception("최대 재시도 횟수 초과")
 
@@ -218,7 +229,8 @@ class TennisReservationAsync:
             self._log(f"[WARN] 연결 예열 실패: {e}")
             return False
 
-    async def get_reservation_page(self, court_number, year, month, day):
+    async def get_reservation_page(self, court_number, year, month, day,
+                                    max_retries=None):
         """예약 페이지 HTML 조회 (GET URL 파라미터 방식)."""
         court_value = config.COURT_VALUE_MAP.get(court_number)
         if not court_value:
@@ -233,7 +245,8 @@ class TennisReservationAsync:
         }
         try:
             return await self._request_with_retry(
-                "GET", config.TENNIS_RESERVATION_URL, params=params
+                "GET", config.TENNIS_RESERVATION_URL, params=params,
+                max_retries=max_retries
             )
         except Exception as e:
             self._log(f"[ERROR] 예약 페이지 조회 실패: {e}")
@@ -340,7 +353,7 @@ class TennisReservationAsync:
             self._log("[TEST] 테스트 모드 - 실제 신청하지 않음", worker_id)
             return True, "테스트 모드 - 신청 건너뜀"
 
-        for attempt in range(config.MAX_RETRIES):
+        for attempt in range(config.SUBMIT_MAX_ATTEMPTS):
             try:
                 # Step 1: DocumentForm 필드 수집
                 # 우선순위: 프리페치 캐시 → reserve()가 조회한 HTML → 재조회
@@ -352,7 +365,10 @@ class TennisReservationAsync:
                     html, page_html = page_html, None
                     form_data = self._collect_document_form(html, worker_id)
                 else:
-                    html = await self.get_reservation_page(court_number, year, month, day)
+                    html = await self.get_reservation_page(
+                        court_number, year, month, day,
+                        max_retries=config.CRITICAL_MAX_RETRIES
+                    )
                     form_data = self._collect_document_form(html, worker_id) if html else None
                 if not form_data:
                     continue
@@ -364,7 +380,8 @@ class TennisReservationAsync:
                 # Step 2: useForm 사용자 정보 수집
                 apply_url = urljoin(config.MAIN_URL, "/rent/rent_period_apply.php")
                 apply_text = await self._request_with_retry(
-                    "POST", apply_url, data=form_data, max_retries=3
+                    "POST", apply_url, data=form_data,
+                    max_retries=config.CRITICAL_MAX_RETRIES
                 )
 
                 soup2 = BeautifulSoup(apply_text, "html.parser")
@@ -396,7 +413,8 @@ class TennisReservationAsync:
                 proc_url = urljoin(config.MAIN_URL, "/rent/rent_period_proc.php")
                 self._log("[INFO] 최종 제출 중...", worker_id)
                 result_text = await self._request_with_retry(
-                    "POST", proc_url, data=form_data, max_retries=3
+                    "POST", proc_url, data=form_data,
+                    max_retries=config.CRITICAL_MAX_RETRIES
                 )
 
                 # ── 실패 조건 (먼저 검사) ──────────────────────────────
@@ -435,9 +453,9 @@ class TennisReservationAsync:
                 return False, "알 수 없는 서버 응답"
 
             except Exception as e:
-                self._log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 신청 오류: {e}", worker_id)
-                if attempt < config.MAX_RETRIES - 1:
-                    await asyncio.sleep(random.uniform(0.1, 0.5))
+                self._log(f"[RETRY {attempt+1}/{config.SUBMIT_MAX_ATTEMPTS}] 예약 신청 오류: {e}", worker_id)
+                if attempt < config.SUBMIT_MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(_backoff_delay(attempt))
 
         return False, "예약 신청 실패 (재시도 초과)"
 
@@ -460,14 +478,15 @@ class TennisReservationAsync:
                 )
             else:
                 html = None
-                for attempt in range(config.MAX_RETRIES):
+                for attempt in range(config.SUBMIT_MAX_ATTEMPTS):
                     html = await self.get_reservation_page(
-                        court_number, dt.year, dt.month, dt.day
+                        court_number, dt.year, dt.month, dt.day,
+                        max_retries=config.CRITICAL_MAX_RETRIES
                     )
                     if html:
                         break
-                    self._log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 페이지 재조회", worker_id)
-                    await asyncio.sleep(random.uniform(0.2, 0.8))
+                    self._log(f"[RETRY {attempt+1}/{config.SUBMIT_MAX_ATTEMPTS}] 예약 페이지 재조회", worker_id)
+                    await asyncio.sleep(_backoff_delay(attempt))
 
                 if not html:
                     return False, "예약 페이지 조회 실패"

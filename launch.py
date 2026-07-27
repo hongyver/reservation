@@ -67,6 +67,29 @@ TMUX_BIN = shutil.which("tmux") or "tmux"
 
 # ─── 계정 파싱 ────────────────────────────────────────────────────────────────
 
+def parse_account_range(spec):
+    """계정 선택 문자열을 번호 집합으로 변환한다.
+
+    "1-10" → {1..10}, "1,3,5" → {1,3,5}, "1-5,8" → {1,2,3,4,5,8}
+    """
+    nums = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            lo, hi = int(lo), int(hi)
+            if lo > hi:
+                raise ValueError(f"범위 역순: {part}")
+            nums.update(range(lo, hi + 1))
+        else:
+            nums.add(int(part))
+    if not nums:
+        raise ValueError(f"빈 선택: {spec!r}")
+    return nums
+
+
 def load_env_file():
     env_file = SCRIPT_DIR / ".env"
     if not env_file.exists():
@@ -601,10 +624,27 @@ def main():
     parser.add_argument("--rehearse", nargs="?", const="90", metavar="초|HH:MM",
                         help="리허설 모드: 전 계정이 동일 오픈 시각으로 전체 흐름 검증 "
                              "(신청 직전 중단, 기본 90초 후)")
+    parser.add_argument("--accounts", metavar="범위",
+                        help="실행할 계정 번호 선택 (다중 PC 분산용). "
+                             "예: 1-10 / 1,3,5 / 1-5,8  (미지정 시 전체)")
     args = parser.parse_args()
 
     load_env_file()
     accounts = load_accounts()
+
+    # --accounts: 계정을 부분 선택해 서로 다른 PC(IP)에 분산 실행
+    if args.accounts:
+        try:
+            wanted = parse_account_range(args.accounts)
+        except ValueError as e:
+            print(f"[ERROR] --accounts: {e}")
+            sys.exit(1)
+        available = {a["num"] for a in accounts}
+        missing = sorted(wanted - available)
+        if missing:
+            print(f"[ERROR] --accounts: .env에 없는 계정 번호: {missing}")
+            sys.exit(1)
+        accounts = [a for a in accounts if a["num"] in wanted]
 
     if not accounts:
         print("[ERROR] 계정이 없습니다.")

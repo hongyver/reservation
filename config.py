@@ -139,11 +139,18 @@ COURT_VALUE_MAP = {
 # ============================================
 # HTTP/네트워크 설정
 # ============================================
-MAX_RETRIES            = 10   # 최대 재시도 횟수
+MAX_RETRIES            = 10   # 최대 재시도 횟수 (로그인·검색 등 비-크리티컬 경로)
 RETRY_DELAY_MIN        = 0.1  # 최소 재시도 대기 (초)
 RETRY_DELAY_MAX        = 1.0  # 최대 재시도 대기 (초)
 CONNECTION_TIMEOUT     = 5    # 연결 타임아웃 (초)
 READ_TIMEOUT           = 30   # 읽기 타임아웃 (초)
+
+# 정각 크리티컬 경로(apply/proc) 재시도 — 서버 폭주 시 단일 IP 자폭 방지를 위해
+# 총량을 작게 유지하고 지수 백오프로 간격을 벌린다.
+SUBMIT_MAX_ATTEMPTS    = int(os.environ.get("TENNIS_SUBMIT_MAX_ATTEMPTS", 3))   # submit_reservation 외부 재시도
+CRITICAL_MAX_RETRIES   = int(os.environ.get("TENNIS_CRITICAL_MAX_RETRIES", 2))  # apply/proc 요청당 재시도
+RETRY_BACKOFF_BASE     = 0.2  # 지수 백오프 기준 (초): base * 2^attempt
+RETRY_BACKOFF_MAX      = 2.0  # 지수 백오프 상한 (초)
 SESSION_RETRY_TOTAL    = 3    # urllib3 소켓 레벨 재시도 횟수
 SESSION_RETRY_BACKOFF  = 0.5  # urllib3 재시도 백오프 계수
 SESSION_POOL_SIZE      = 10   # 연결 풀 크기

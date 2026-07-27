@@ -50,6 +50,7 @@ python3 launch.py                  # tmux 세션 + 새 터미널 창 (기본)
 python3 launch.py --no-tmux        # iTerm2 native split / Linux 개별 창
 python3 launch.py --background     # 백그라운드 subprocess + 로그 파일
 python3 launch.py --group-size 2   # 터미널 창당 계정 수 조정
+python3 launch.py --accounts 1-10  # 계정 부분 선택 (다중 PC 분산: PC별로 범위 지정)
 python3 launch.py --test           # 테스트 모드
 python3 launch.py --dry-run        # 실행 내용 미리 확인
 
@@ -185,10 +186,36 @@ TENNIS_USER_PW=비밀번호
 
 - `RESERVATION_DAY` / `TENNIS_RESERVATION_DAY`: 매월 오픈 일 (0 = 즉시 실행)
 - `MAX_CONCURRENT`: 병렬 예약 동시 세션 수
-- `MAX_RETRIES`: 접속 폭주 시 재시도 횟수 (기본 10)
+- `MAX_RETRIES`: 비-크리티컬(로그인·검색) 재시도 횟수 (기본 10)
 - `LOGIN_ADVANCE_MINUTES` / `TENNIS_LOGIN_ADVANCE_MINUTES`: 예약 오픈 N분 전에 로그인 시작 (기본 10분)
 - `SLOTS_PER_ACCOUNT` / `TENNIS_SLOTS_PER_ACCOUNT`: 뷰어 재배치 시 계정당 배정 슬롯 수 (기본 4, 범위 1~10)
 - `FIRE_JITTER_MS` / `TENNIS_FIRE_JITTER_MS`: 정각 발사 지터 상한 ms (기본 150, 0=비활성) — 동일 IP 동시 폭주 완화
+- `SUBMIT_MAX_ATTEMPTS` / `TENNIS_SUBMIT_MAX_ATTEMPTS`: 정각 apply/proc 외부 재시도 (기본 3)
+- `CRITICAL_MAX_RETRIES` / `TENNIS_CRITICAL_MAX_RETRIES`: apply/proc 요청당 재시도 (기본 2)
+
+### 재시도 폭증 억제 (정각 서버 폭주 대응)
+
+정각에는 병목이 클라이언트가 아니라 서버(요청 큐 포화 + IP당 제한)로 옮겨간다.
+크리티컬 경로(apply/proc)의 재시도를 작게 유지해 단일 IP 요청 폭주로 인한
+서버 IP 차단(자폭)을 막는다:
+
+- 확정 실패("1일 1건 초과"·"이미 예약된 시간"·"마감" 등)는 **재시도 없이 즉시 중단**
+- 외부 재시도 `SUBMIT_MAX_ATTEMPTS`(3) × 요청당 `CRITICAL_MAX_RETRIES`(2)로 총량 상한
+- 재시도 간격은 지수 백오프 + full jitter (`_backoff_delay`: `RETRY_BACKOFF_BASE·2^n`, 상한 `RETRY_BACKOFF_MAX`)
+- 비-크리티컬(로그인·검색)은 여유 시간대라 기존 `MAX_RETRIES`(10) 유지
+
+### 다중 PC 분산 (IP당 제한 우회)
+
+단일 IP에서 전 계정을 실행하면 IP당 동시연결·요청 상한에 걸려 전 계정이 동시에
+차단될 수 있다. 회선이 물리적으로 다른 여러 PC에 계정을 나눠 공인 IP를 분산한다:
+
+- PC-A: `python3 launch.py --accounts 1-10`
+- PC-B: `python3 launch.py --accounts 11-19`
+
+각 PC는 자기 몫만 보내므로 IP당 부하가 줄고, 한 IP가 차단돼도 나머지는 생존한다.
+`--accounts`는 `1-10` / `1,3,5` / `1-5,8` 형식을 지원한다. **같은 공유기면 IP가
+같아 효과가 없으므로 회선이 달라야 한다.** 다중 PC로 IP당 세션이 적을 때는
+`TENNIS_FIRE_JITTER_MS=0`으로 두어 정각 즉시 발사(최고 속도)해도 안전하다.
 
 ## API 서버 엔드포인트
 
