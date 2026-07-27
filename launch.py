@@ -39,6 +39,7 @@ GROUP_SIZE = 4
 TMUX_SESSION_PREFIX = "tennis"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_PY = SCRIPT_DIR / "main.py"
+LOGS_DIR = SCRIPT_DIR / "logs"   # 백그라운드 실행 로그 (reservation_async 타이밍 로그와 동일 폴더)
 TMP_DIR = Path("/tmp")
 
 IS_MACOS = sys.platform == "darwin"
@@ -393,7 +394,8 @@ def open_new_terminal(script_path, terminal_app, dry_run=False):
         if not terminal_app:
             print(f"  [WARN] 터미널 에뮬레이터 없음 — 백그라운드로 실행: {script_path.name}")
             if not dry_run:
-                log = SCRIPT_DIR / f"{script_path.stem}.log"
+                LOGS_DIR.mkdir(exist_ok=True)
+                log = LOGS_DIR / f"{script_path.stem}.log"
                 with open(log, "w") as lf:
                     subprocess.Popen(["bash", str(script_path)],
                                      stdout=lf, stderr=subprocess.STDOUT)
@@ -563,14 +565,15 @@ def _run_no_tmux_linux(accounts, extra_flags, terminal_app, dry_run):
 def run_background_fallback(accounts, extra_flags):
     """--background: 터미널 창 없이 백그라운드 subprocess + 로그 파일로 실행."""
     print(f"[launch] {len(accounts)}개 계정을 백그라운드로 실행합니다.")
+    LOGS_DIR.mkdir(exist_ok=True)
     procs = []
     for a in accounts:
         cmd = [sys.executable, str(MAIN_PY), "--account", str(a["num"])] + extra_flags
-        log_path = SCRIPT_DIR / f"account_{a['num']}.log"
+        log_path = LOGS_DIR / f"account_{a['num']}.log"
         with open(log_path, "w") as log_f:
             proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
         procs.append((a, proc, log_path))
-        print(f"  계정 {a['num']:2d} ({a['user_id']}): PID {proc.pid} → {log_path.name}")
+        print(f"  계정 {a['num']:2d} ({a['user_id']}): PID {proc.pid} → logs/{log_path.name}")
 
     print()
     print("[launch] 모든 프로세스 시작 완료. Ctrl+C 로 전체 종료.")
