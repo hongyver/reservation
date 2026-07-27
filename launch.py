@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ─── 상수 ─────────────────────────────────────────────────────────────────────
@@ -597,6 +598,9 @@ def main():
     parser.add_argument("--group-size", type=int, default=GROUP_SIZE,
                         metavar="N",
                         help=f"터미널 창당 최대 계정(pane) 수 (기본값: {GROUP_SIZE})")
+    parser.add_argument("--rehearse", nargs="?", const="90", metavar="초|HH:MM",
+                        help="리허설 모드: 전 계정이 동일 오픈 시각으로 전체 흐름 검증 "
+                             "(신청 직전 중단, 기본 90초 후)")
     args = parser.parse_args()
 
     load_env_file()
@@ -631,6 +635,29 @@ def main():
         print("  모드: 로그인 테스트")
     else:
         print("  모드: 실제 예약")
+
+    if args.rehearse is not None:
+        # 상대 초는 여기서 한 번만 절대 시각으로 변환해
+        # 모든 계정 프로세스가 동일한 오픈 시각을 공유하게 한다
+        rehearse_at = args.rehearse
+        try:
+            if ":" in rehearse_at:
+                h, m = rehearse_at.split(":", 1)
+                t = datetime.now().replace(hour=int(h), minute=int(m),
+                                           second=0, microsecond=0)
+                if t <= datetime.now():
+                    print(f"[ERROR] --rehearse: 이미 지난 시각입니다: {rehearse_at}")
+                    sys.exit(1)
+            else:
+                t = datetime.now() + timedelta(seconds=int(rehearse_at))
+                if t.second or t.microsecond:
+                    t = t.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            rehearse_at = t.strftime("%H:%M")
+        except ValueError:
+            print(f"[ERROR] --rehearse: 잘못된 값입니다 (초 또는 HH:MM): {rehearse_at}")
+            sys.exit(1)
+        extra_flags += ["--rehearse", rehearse_at]
+        print(f"  리허설: 오픈 {rehearse_at} (전 계정 공통, 신청 직전 중단)")
     print()
 
     # 실행 모드 결정 (우선순위: --background > --no-tmux > tmux > no-tmux fallback)

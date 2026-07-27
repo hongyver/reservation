@@ -11,12 +11,14 @@
     python3 main.py --browser     # 브라우저 모드로 실행 (Selenium)
     python3 main.py --search 2    # 2월 주말 예약 가능 시간 검색
     python3 main.py --search 2026-02  # 2026년 2월 검색
+    python3 main.py --rehearse    # 리허설 (오픈을 90초 후로 강제, 신청 직전 중단)
+    python3 main.py --rehearse 14:30  # 오픈 시각 직접 지정
 """
 
 import asyncio
 import sys
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import urllib3
 import getpass
 import os
@@ -298,6 +300,26 @@ def parse_search_month(search_arg):
     return year, month
 
 
+def parse_rehearse_target(value):
+    """--rehearse 값(초 또는 HH:MM)을 오늘의 오픈 시각으로 변환한다.
+
+    오픈 시각은 분 경계만 지원하므로 상대 초는 다음 분 경계로 올림한다.
+    """
+    now = datetime.now()
+    if ":" in value:
+        h, m = value.split(":", 1)
+        target = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+        if target <= now:
+            raise ValueError(f"이미 지난 시각입니다: {value}")
+    else:
+        target = now + timedelta(seconds=int(value))
+        if target.second or target.microsecond:
+            target = target.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        if target.day != now.day:
+            raise ValueError("자정을 넘기는 리허설은 지원하지 않습니다")
+    return target
+
+
 def main():
     parser = argparse.ArgumentParser(description="고양시 테니스장 자동 예약")
     parser.add_argument("--test", action="store_true",
@@ -312,6 +334,9 @@ def main():
                         help="전체 날짜/시간 예약 가능 시간 검색 (예: 2 또는 2026-02)")
     parser.add_argument("--account", type=int, metavar="N",
                         help="실행할 계정 번호 (launch.py 다중 계정 모드에서 자동 호출)")
+    parser.add_argument("--rehearse", nargs="?", const="90", metavar="초|HH:MM",
+                        help="리허설 모드: 오픈 시각을 N초 후(분 경계 올림) 또는 HH:MM으로 강제. "
+                             "로그인→프리페치→정각 발사까지 검증하고 신청 직전에 멈춤 (기본 90초)")
     args = parser.parse_args()
 
     # --account N: 해당 계정 설정으로 config 오버라이드
@@ -326,6 +351,21 @@ def main():
         if acct["reservation_config"] is not None:
             config.RESERVATION_CONFIG = acct["reservation_config"]
         print(f"[계정 {args.account}] {acct['user_id']} 로 실행합니다.")
+
+    # 리허설 모드: 오픈 시각을 오늘 임의 시각으로 강제하고 테스트 모드로 실행
+    if args.rehearse is not None:
+        try:
+            target = parse_rehearse_target(args.rehearse)
+        except ValueError as e:
+            print(f"[ERROR] --rehearse: {e}")
+            sys.exit(1)
+        config.RESERVATION_DAY = target.day
+        config.RESERVATION_HOUR = target.hour
+        config.RESERVATION_MINUTE = target.minute
+        args.test = True  # 리허설은 항상 실제 신청 전에 멈춘다
+        print(f"[REHEARSE] 리허설 모드: 오픈 {target.strftime('%H:%M')} "
+              f"({(target - datetime.now()).total_seconds():.0f}초 후)")
+        print("[REHEARSE] 로그인 → T-20초 프리페치 → T-4초 재예열 → 정각 발사까지 검증, 신청 직전 중단")
 
     # 검색 모드는 설정 출력 생략하지만 로그인 정보는 필요
     if args.search or args.search2:
