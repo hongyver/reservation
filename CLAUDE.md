@@ -40,6 +40,11 @@ python3 main.py --search 2026-03
 # 전체 날짜 예약 가능 시간 검색
 python3 main.py --search2 3
 
+# 리허설 모드: 오픈 시각을 강제해 로그인→프리페치→정각 발사를 실전과 동일하게 검증 (신청 직전 중단)
+python3 main.py --rehearse             # 90초 후 오픈 (분 경계 올림)
+python3 main.py --rehearse 300         # 300초 후
+python3 launch.py --rehearse 10:45     # 전 계정이 동일 오픈 시각 공유
+
 # 다중 계정 tmux 런처 (4개씩 그룹, 각 그룹에 새 터미널 창)
 python3 launch.py                  # tmux 세션 + 새 터미널 창 (기본)
 python3 launch.py --no-tmux        # iTerm2 native split / Linux 개별 창
@@ -82,16 +87,34 @@ viewer.py            # 예약 현황 달력 뷰어 (HTTP 서버 내장, 실시�
 2. **Phase 1** — 로그인 전 대기 (`wait_before_login_async`): 오픈 10분 전까지 asyncio.sleep
 3. **Phase 2** — N개 봇 병렬 로그인 (`asyncio.gather`): 각 예약 건마다 독립 세션(PHPSESSID) 생성
 4. **Phase 3** — 오픈 시간 정밀 대기 (`wait_for_reservation_open_async`): 마지막 10초는 10ms 단위.
-   keepalive 만료 대비로 남은 20초/4초 시점에 전 세션 연결 재예열(warmup) 트리거 (fire-and-forget, 타임아웃 3초)
+   keepalive 만료 대비로 오픈 직전 2회 warmup 트리거 (fire-and-forget):
+   - 1차(남은 20초): `prefetch_form()` — 대상 페이지 조회로 연결 예열 + `DocumentForm` 필드 캐시
+   - 2차(남은 4초): 경량 재예열 (타임아웃 3초)
 5. **Phase 4** — `asyncio.gather` + `Semaphore(MAX_CONCURRENT)`로 동시 예약 실행
 
 각 예약 봇의 내부 흐름:
 1. `get_reservation_page()` → 대상 코트/날짜 페이지 HTML 조회
 2. `get_available_slots()` → BeautifulSoup으로 가능 슬롯 파싱
 3. `submit_reservation()` → 3단계 제출:
-   - 1단계는 `reserve()`가 조회한 페이지 HTML을 재사용해 재조회 생략 (재시도 시에만 재조회)
+   - 1단계는 프리페치 캐시 → `reserve()`가 조회한 HTML → 재조회 순으로 폼 확보 (캐시는 1회용, 재시도 시 재조회)
    - POST `rent_period_apply.php` → `DocumentForm` + `useForm` 필드 수집
    - POST `rent_period_proc.php` → 최종 대관신청
+
+**프리페치 경로**: T-20초 프리페치가 성공하면 정각에는 페이지 GET·슬롯 확인을 생략하고
+apply POST부터 시작한다 (3왕복 → 2왕복). 슬롯 값은 `"HHMM+2h"` 형식으로 직접 구성
+(예: 8시 → `08001000`). 프리페치 실패·캐시 무효 시 기존 GET 경로로 자동 폴백.
+미오픈 날짜 페이지에도 DocumentForm은 존재하나(실측 확인) `rent_gubun`·`TotalPay`가
+빠져 있어 상수 기본값(`'1001'`/`'0'`)으로 보충한다.
+
+### 타이밍 분석 로그
+
+예약 실행 시 `logs/timing_YYYYMMDD_HHMMSS_{ID}.jsonl`에 예약 1건당 1줄(JSON) 기록:
+
+- 요약 필드: `fire_ts`(정각 발사 시각), `sem_wait_ms`(세마포어 대기), `total_ms`, `success`, `message`
+- `events[]`: 로그인부터의 모든 HTTP 시도 — `path`, `attempt`, `outcome`(`ok`/`timeout`/`conn_error`/`http_NNN`/`error`), `elapsed_ms`, `bytes`
+
+정각 지연 분석 방법: `fire_ts` vs 10:00:00.000 차이(시작 지연), 첫 GET의 `elapsed_ms`(서버 응답 지연),
+`timeout`/`conn_error` 빈도(접속 폭주), 연속 이벤트 사이 간격(파싱 CPU 병목)을 확인한다.
 
 ### 왜 예약 1건 = 독립 세션인가
 

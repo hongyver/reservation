@@ -13,15 +13,30 @@
 
 import asyncio
 import calendar
+import json
 import random
+import time
 from datetime import date, datetime
-from urllib.parse import urljoin
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
 
 import config
 from utils import wait_before_login_async, wait_for_reservation_open_async
+
+LOGS_DIR = Path(__file__).resolve().parent / "logs"
+
+
+def _dump_timing(log_path, record):
+    """타이밍 분석 로그를 JSONL로 추가 기록. 실패해도 예약 흐름에 영향 없음."""
+    try:
+        LOGS_DIR.mkdir(exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[WARN] 타이밍 로그 기록 실패: {e}")
 
 
 class TennisReservationAsync:
@@ -36,6 +51,8 @@ class TennisReservationAsync:
     def __init__(self):
         self.session: aiohttp.ClientSession | None = None
         self.logged_in = False
+        self.timing = []  # 요청 단위 타이밍 이벤트 (정각 지연 분석용)
+        self.prefetched_form = None  # 정각 전 캐시한 DocumentForm 필드
 
     async def __aenter__(self):
         await self._create_session()
@@ -75,6 +92,26 @@ class TennisReservationAsync:
         prefix = f"[W{worker_id}]" if worker_id is not None else ""
         print(f"{ts} {prefix} {msg}")
 
+    def _record(self, start_mono, method, url, attempt, outcome,
+                status=None, size=None):
+        """요청 1회 시도의 타이밍 이벤트를 기록한다 (JSONL 분석 로그용)."""
+        try:
+            event = {
+                "ts": datetime.now().isoformat(timespec="milliseconds"),
+                "elapsed_ms": round((time.monotonic() - start_mono) * 1000, 1),
+                "method": method,
+                "path": urlparse(url).path or url,
+                "attempt": attempt,
+                "outcome": outcome,
+            }
+            if status is not None:
+                event["status"] = status
+            if size is not None:
+                event["bytes"] = size
+            self.timing.append(event)
+        except Exception:
+            pass
+
     async def _request_with_retry(self, method, url, max_retries=None, **kwargs):
         """재시도 포함 비동기 HTTP 요청. 성공 시 응답 텍스트 반환."""
         if max_retries is None:
@@ -82,12 +119,15 @@ class TennisReservationAsync:
 
         last_error = None
         for attempt in range(max_retries):
+            t_start = time.monotonic()
             try:
                 async with self.session.request(method, url, **kwargs) as resp:
                     resp.raise_for_status()
                     # 서버가 EUC-KR 선언이지만 UTF-8 바이트를 혼용하는 경우 대응:
                     # 바이트를 직접 읽어 euc-kr → cp949 → utf-8 → replace 순으로 시도
                     raw = await resp.read()
+                    self._record(t_start, method, url, attempt + 1, "ok",
+                                 status=resp.status, size=len(raw))
                     for enc in ("euc-kr", "cp949", "utf-8"):
                         try:
                             return raw.decode(enc)
@@ -97,20 +137,24 @@ class TennisReservationAsync:
 
             except aiohttp.ClientResponseError as e:
                 last_error = e
+                self._record(t_start, method, url, attempt + 1, f"http_{e.status}")
                 self._log(f"[RETRY {attempt+1}/{max_retries}] HTTP {e.status}: {url}")
                 if 400 <= e.status < 500:
                     raise
 
             except asyncio.TimeoutError as e:
                 last_error = e
+                self._record(t_start, method, url, attempt + 1, "timeout")
                 self._log(f"[RETRY {attempt+1}/{max_retries}] 타임아웃: {url}")
 
             except aiohttp.ClientConnectionError as e:
                 last_error = e
+                self._record(t_start, method, url, attempt + 1, "conn_error")
                 self._log(f"[RETRY {attempt+1}/{max_retries}] 연결 오류: {url}")
 
             except Exception as e:
                 last_error = e
+                self._record(t_start, method, url, attempt + 1, "error")
                 self._log(f"[RETRY {attempt+1}/{max_retries}] 오류: {e}")
 
             if attempt < max_retries - 1:
@@ -218,6 +262,63 @@ class TennisReservationAsync:
             self._log(f"[ERROR] 시간대 파싱 오류: {e}")
         return available
 
+    def _collect_document_form(self, html, worker_id=None):
+        """페이지 HTML에서 DocumentForm 필드를 수집한다. 실패 시 None."""
+        soup = BeautifulSoup(html, "html.parser")
+        doc_form = soup.find("form", {"name": "DocumentForm"})
+        if not doc_form:
+            self._log("[WARN] DocumentForm을 찾을 수 없음", worker_id)
+            return None
+
+        form_data = {
+            inp["name"]: inp.get("value", "")
+            for inp in doc_form.find_all("input")
+            if inp.get("name")
+        }
+        for select in doc_form.find_all("select"):
+            if select.get("name"):
+                selected = select.find("option", selected=True)
+                if selected:
+                    form_data[select["name"]] = selected.get("value", "")
+        return form_data
+
+    async def prefetch_form(self, court_number, year, month, day, worker_id=None):
+        """정각 전에 대상 페이지를 조회해 DocumentForm 필드를 캐시한다.
+
+        성공 시 reserve()가 정각에 페이지 GET 없이 apply.php POST부터 시작한다.
+        연결 예열 효과 겸용. 실패해도 정각에 기존 GET 경로로 폴백하므로 무해하다.
+        재시도·타임아웃을 짧게 잡아 정각 전에 반드시 끝나게 한다.
+        """
+        court_value = config.COURT_VALUE_MAP.get(court_number)
+        if not court_value:
+            return False
+        params = {
+            "place_opt": court_value,
+            "nyear": str(year),
+            "nmonth": str(month).zfill(2),
+            "nday": str(day).zfill(2),
+        }
+        try:
+            html = await self._request_with_retry(
+                "GET", config.TENNIS_RESERVATION_URL, params=params,
+                max_retries=2, timeout=aiohttp.ClientTimeout(total=8),
+            )
+        except Exception as e:
+            self._log(f"[WARN] 폼 프리페치 실패 (정각에 GET 경로로 폴백): {e}", worker_id)
+            return False
+
+        form_data = self._collect_document_form(html, worker_id)
+        if not form_data:
+            return False
+        # 미오픈 페이지에는 오픈 후 생기는 필드가 빠져 있어 기본값으로 보충한다.
+        # (전 코트/날짜에서 상수임을 실측 확인: rent_gubun='1001', TotalPay='0'.
+        #  rent_chk[]는 submit_reservation이 직접 설정)
+        form_data.setdefault("rent_gubun", "1001")
+        form_data.setdefault("TotalPay", "0")
+        self.prefetched_form = form_data
+        self._log("[INFO] 폼 프리페치 완료 — 정각에 apply부터 시작", worker_id)
+        return True
+
     async def submit_reservation(self, court_number, year, month, day,
                                   time_value, test_mode=False, worker_id=None,
                                   page_html=None):
@@ -240,29 +341,19 @@ class TennisReservationAsync:
         for attempt in range(config.MAX_RETRIES):
             try:
                 # Step 1: DocumentForm 필드 수집
-                if page_html is not None:
-                    html, page_html = page_html, None  # 재시도부터는 재조회
+                # 우선순위: 프리페치 캐시 → reserve()가 조회한 HTML → 재조회
+                # (캐시·재사용은 1회용 — 실패 후 재시도부터는 항상 재조회)
+                if self.prefetched_form is not None:
+                    form_data = dict(self.prefetched_form)
+                    self.prefetched_form = None
+                elif page_html is not None:
+                    html, page_html = page_html, None
+                    form_data = self._collect_document_form(html, worker_id)
                 else:
                     html = await self.get_reservation_page(court_number, year, month, day)
-                if not html:
+                    form_data = self._collect_document_form(html, worker_id) if html else None
+                if not form_data:
                     continue
-
-                soup = BeautifulSoup(html, "html.parser")
-                doc_form = soup.find("form", {"name": "DocumentForm"})
-                if not doc_form:
-                    self._log("[WARN] DocumentForm을 찾을 수 없음", worker_id)
-                    continue
-
-                form_data = {
-                    inp["name"]: inp.get("value", "")
-                    for inp in doc_form.find_all("input")
-                    if inp.get("name")
-                }
-                for select in doc_form.find_all("select"):
-                    if select.get("name"):
-                        selected = select.find("option", selected=True)
-                        if selected:
-                            form_data[select["name"]] = selected.get("value", "")
 
                 form_data["place_opt"] = config.COURT_VALUE_MAP[court_number]
                 form_data["rent_chk[]"] = time_value
@@ -355,38 +446,49 @@ class TennisReservationAsync:
         try:
             dt = datetime.strptime(target_date, "%Y-%m-%d")
 
-            html = None
-            for attempt in range(config.MAX_RETRIES):
-                html = await self.get_reservation_page(
-                    court_number, dt.year, dt.month, dt.day
+            if self.prefetched_form is not None:
+                # 프리페치 경로: 페이지 조회·슬롯 확인을 생략하고 apply부터 시작.
+                # 슬롯 값은 "시작HHMM+2시간" 형식으로 예측 가능하며,
+                # 선점 실패 여부는 proc.php 응답 메시지로 판정된다.
+                time_value = f"{target_hour:02d}00{target_hour + 2:02d}00"
+                self._log("[INFO] 프리페치 폼 사용 — 페이지 조회 생략", worker_id)
+                success, message = await self.submit_reservation(
+                    court_number, dt.year, dt.month, dt.day,
+                    time_value, test_mode, worker_id,
                 )
-                if html:
-                    break
-                self._log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 페이지 재조회", worker_id)
-                await asyncio.sleep(random.uniform(0.2, 0.8))
+            else:
+                html = None
+                for attempt in range(config.MAX_RETRIES):
+                    html = await self.get_reservation_page(
+                        court_number, dt.year, dt.month, dt.day
+                    )
+                    if html:
+                        break
+                    self._log(f"[RETRY {attempt+1}/{config.MAX_RETRIES}] 예약 페이지 재조회", worker_id)
+                    await asyncio.sleep(random.uniform(0.2, 0.8))
 
-            if not html:
-                return False, "예약 페이지 조회 실패"
+                if not html:
+                    return False, "예약 페이지 조회 실패"
 
-            available = self.get_available_slots(html)
-            if not available:
-                self._log("[WARN] 예약 가능 시간대 없음", worker_id)
-                return False, "예약 가능 시간대 없음"
+                available = self.get_available_slots(html)
+                if not available:
+                    self._log("[WARN] 예약 가능 시간대 없음", worker_id)
+                    return False, "예약 가능 시간대 없음"
 
-            self._log(f"[INFO] 예약 가능: {[s['start'] for s in available]}", worker_id)
+                self._log(f"[INFO] 예약 가능: {[s['start'] for s in available]}", worker_id)
 
-            target_slot = next(
-                (s for s in available if s["start_hour"] == target_hour), None
-            )
-            if not target_slot:
-                self._log(f"[WARN] {target_hour:02d}:00 예약 불가", worker_id)
-                return False, f"{target_hour:02d}:00 예약 불가"
+                target_slot = next(
+                    (s for s in available if s["start_hour"] == target_hour), None
+                )
+                if not target_slot:
+                    self._log(f"[WARN] {target_hour:02d}:00 예약 불가", worker_id)
+                    return False, f"{target_hour:02d}:00 예약 불가"
 
-            success, message = await self.submit_reservation(
-                court_number, dt.year, dt.month, dt.day,
-                target_slot["value"], test_mode, worker_id,
-                page_html=html,
-            )
+                success, message = await self.submit_reservation(
+                    court_number, dt.year, dt.month, dt.day,
+                    target_slot["value"], test_mode, worker_id,
+                    page_html=html,
+                )
 
             if success:
                 self._log(f"[SUCCESS] {target_date} {target_hour:02d}:00 예약 완료!", worker_id)
@@ -498,13 +600,30 @@ async def run_reservation_async(
     # ── Phase 3: 예약 오픈 시간까지 비동기 대기 ──────────────────
     # 로그인 직후 예열한 연결은 keepalive(클라 30초, 서버 수 초)로 정각 전에
     # 끊기므로, 대기 루프가 오픈 직전(남은 20초/4초)에 재예열을 트리거한다.
+    # 1차(20초)는 대상 페이지 프리페치로 승격: 연결 예열 + DocumentForm 캐시
+    # → 정각에 GET 생략하고 apply부터 시작. 2차(4초)는 경량 재예열.
     if wait_for_open:
+        rewarm_count = 0
+
+        async def _prefetch(bot, idx, d, c):
+            pdt = datetime.strptime(d, "%Y-%m-%d")
+            await bot.prefetch_form(c, pdt.year, pdt.month, pdt.day, worker_id=idx)
+
         async def rewarm_all():
-            await asyncio.gather(
-                *[bot.warmup_connection(max_retries=1, total_timeout=3)
-                  for bot, *_ in bots],
-                return_exceptions=True,
-            )
+            nonlocal rewarm_count
+            rewarm_count += 1
+            if rewarm_count == 1:
+                await asyncio.gather(
+                    *[_prefetch(bot, i + 1, d, c)
+                      for i, (bot, d, h, c) in enumerate(bots)],
+                    return_exceptions=True,
+                )
+            else:
+                await asyncio.gather(
+                    *[bot.warmup_connection(max_retries=1, total_timeout=3)
+                      for bot, *_ in bots],
+                    return_exceptions=True,
+                )
 
         if not await wait_for_reservation_open_async(warmup=rewarm_all):
             for bot, *_ in bots:
@@ -514,15 +633,30 @@ async def run_reservation_async(
 
     # ── Phase 4: 동시 예약 실행 (독립 세션) ─────────────────────
     sem = asyncio.Semaphore(config.MAX_CONCURRENT)
+    log_path = LOGS_DIR / f"timing_{datetime.now():%Y%m%d_%H%M%S}_{uid}.jsonl"
 
     async def worker(bot, task_idx, d, h, c):
+        t_queued = time.monotonic()
         async with sem:
+            sem_wait_ms = round((time.monotonic() - t_queued) * 1000, 1)
+            fire_ts = datetime.now().isoformat(timespec="milliseconds")
+            t_fire = time.monotonic()
+            success, message = False, "예외 발생"
             try:
                 success, message = await bot.reserve(d, h, c, test_mode, worker_id=task_idx)
                 return {"date": d, "hour": h, "court": c,
                         "success": success, "message": message}
             finally:
                 await bot.close()
+                # 예약 1건 요약 + 로그인부터의 전체 요청 이벤트 (분석용)
+                _dump_timing(log_path, {
+                    "worker": task_idx, "user_id": uid,
+                    "date": d, "hour": h, "court": c,
+                    "fire_ts": fire_ts, "sem_wait_ms": sem_wait_ms,
+                    "total_ms": round((time.monotonic() - t_fire) * 1000, 1),
+                    "success": success, "message": message,
+                    "events": bot.timing,
+                })
 
     results = list(await asyncio.gather(
         *[worker(bot, i + 1, d, h, c) for i, (bot, d, h, c) in enumerate(bots)]
