@@ -72,7 +72,8 @@ docker-compose up -d
 main.py              # 진입점. argparse로 모드 분기, 자격증명 수집
                      # --account N 플래그로 다중 계정 개별 실행 지원
 config.py            # 설정 전체 관리. .env 로드, RESERVATION_CONFIG 정의 및 환경변수 오버라이드
-                     # load_accounts(): TENNIS_ACCOUNT_N_* 환경변수에서 다중 계정 파싱
+                     # load_accounts(): accounts.txt(행 번호=계정 번호) 우선,
+                     #   없으면 TENNIS_ACCOUNT_N_* 환경변수에서 다중 계정 파싱
 reservation_async.py # 핵심 HTTP 예약 로직 (asyncio + aiohttp)
 utils.py             # 예약 타이밍 대기 함수 (동기 + 비동기 버전)
 reservation_http.py  # 구 HTTP 예약 로직 (requests) — fallback 보존
@@ -234,21 +235,36 @@ Docker 배포 시 포트 `3100`으로 노출. `.env` 환경변수 또는 `docker
 
 ## 다중 계정 설정 (`launch.py`)
 
-### `.env` 다중 계정 형식
+### 계정 자격증명 — `accounts.txt` (우선)
 
 ```
-# 계정 N: TENNIS_ACCOUNT_N_ID / PW / RESERVATION_M
-TENNIS_ACCOUNT_1_ID=user1
-TENNIS_ACCOUNT_1_PW=pass1
+이름,아이디,비밀번호
+홍성제,user1,pass1
+,user2,pass2
+```
+
+- **행 번호(1부터) = 계정 번호.** 빈 행·주석(`#`)·형식 오류 행도 번호를 차지하는
+  결번이다 — 중간 계정을 삭제할 때는 행을 지우지 말고 빈 행으로 남겨야
+  `.env`의 `TENNIS_ACCOUNT_N_RESERVATION_*` 매핑이 밀리지 않는다.
+  같은 이유로 파일 상단에 주석을 추가하면 전체 번호가 밀리므로 금지.
+- 파싱은 `split(",", 2)` — 비밀번호에 `/`·`,` 등 특수문자가 있어도 셋째 필드
+  전체가 비밀번호로 처리된다. 이름은 비워도 된다 (`,user2,pass2`).
+- `accounts.txt`가 없으면 `.env`의 `TENNIS_ACCOUNT_N_ID/PW`로 폴백한다.
+- `.gitignore`에 등록되어 있어 커밋되지 않는다 (`accounts.txt.bak` 포함).
+
+### `.env` 예약 조건 형식
+
+자격증명 소스와 무관하게 예약 조건은 `.env`의 `TENNIS_ACCOUNT_N_*`에서 읽는다:
+
+```
 TENNIS_ACCOUNT_1_RESERVATION_1=2026-06-07:10:1   # 날짜:시간:코트
 TENNIS_ACCOUNT_1_RESERVATION_2=2026-06-14:08:2
-
-TENNIS_ACCOUNT_2_ID=user2
-TENNIS_ACCOUNT_2_PW=pass2
 TENNIS_ACCOUNT_2_RESERVATION_1=2026-06-07:08:3
 ```
 
 예약 조건은 단일 계정과 동일하게 방법 1/2/3 모두 지원 (`TENNIS_ACCOUNT_N_DATES` 등).
+뷰어 저장 시 삽입 앵커: `TENNIS_ACCOUNT_N_PW=` 라인 → 기존 예약 블록 자리 →
+파일 끝(`# 계정 N 예약` 주석) 순으로 폴백.
 
 ### `launch.py` 동작 방식
 

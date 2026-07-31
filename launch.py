@@ -106,15 +106,9 @@ def load_env_file():
 
 
 def load_accounts():
-    """TENNIS_ACCOUNT_N_ID/PW 환경변수에서 계정 목록 반환."""
-    accounts = []
-    for n in range(1, 100):
-        uid = os.environ.get(f"TENNIS_ACCOUNT_{n}_ID", "").strip()
-        upw = os.environ.get(f"TENNIS_ACCOUNT_{n}_PW", "").strip()
-        if not uid or not upw:
-            continue
-        accounts.append({"num": n, "user_id": uid})
-    return accounts
+    """config.load_accounts()로 계정 목록 반환 (accounts.txt 우선, .env 폴백)."""
+    import config
+    return [{"num": a["num"], "user_id": a["user_id"]} for a in config.load_accounts()]
 
 
 def chunk_accounts(accounts, size):
@@ -645,16 +639,17 @@ def main():
         available = {a["num"] for a in accounts}
         missing = sorted(wanted - available)
         if missing:
-            print(f"[ERROR] --accounts: .env에 없는 계정 번호: {missing}")
+            print(f"[ERROR] --accounts: accounts.txt/.env에 없는 계정 번호: {missing}")
             sys.exit(1)
         accounts = [a for a in accounts if a["num"] in wanted]
 
     if not accounts:
         print("[ERROR] 계정이 없습니다.")
         print()
-        print("  .env에 다음 형식으로 계정을 추가하세요:")
-        print("    TENNIS_ACCOUNT_1_ID=아이디")
-        print("    TENNIS_ACCOUNT_1_PW=비밀번호")
+        print("  accounts.txt에 한 줄씩 계정을 추가하세요 (행 번호 = 계정 번호):")
+        print("    이름,아이디,비밀번호")
+        print()
+        print("  예약 조건은 .env에 추가하세요:")
         print("    TENNIS_ACCOUNT_1_RESERVATION_1=2026-06-07:10:1")
         print()
         print("  단일 계정 모드는 python3 main.py 를 직접 실행하세요.")

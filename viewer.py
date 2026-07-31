@@ -42,7 +42,10 @@ _ENV_LOCK = threading.Lock()
 def update_env_reservations(account_num, slots):
     """.env에서 해당 계정의 RESERVATION_* 라인을 체크된 슬롯으로 교체한다.
 
-    - 삽입 위치: TENNIS_ACCOUNT_N_PW= 라인 바로 아래
+    - 삽입 위치 우선순위 (자격증명이 accounts.txt로 이동해 PW 라인이 없을 수 있음):
+      1) TENNIS_ACCOUNT_N_PW= 라인 바로 아래
+      2) 제거한 기존 RESERVATION_* 블록이 있던 자리
+      3) 파일 끝 (# 계정 N 주석과 함께 추가)
     - 정렬: 날짜(오름차순) → 시간(오름차순) → 코트(오름차순)
 
     Returns: (ok: bool, detail: int|str)
@@ -57,15 +60,23 @@ def update_env_reservations(account_num, slots):
         prefix  = f"TENNIS_ACCOUNT_{account_num}_RESERVATION_"
         pw_key  = f"TENNIS_ACCOUNT_{account_num}_PW="
 
-        lines = original.splitlines(keepends=True)
-        lines = [l for l in lines if not l.strip().startswith(prefix)]
+        lines, first_res_idx = [], None
+        for l in original.splitlines(keepends=True):
+            if l.strip().startswith(prefix):
+                if first_res_idx is None:
+                    first_res_idx = len(lines)
+                continue
+            lines.append(l)
 
         insert_idx = next(
             (i + 1 for i, l in enumerate(lines) if l.strip().startswith(pw_key)),
-            None,
+            first_res_idx,
         )
         if insert_idx is None:
-            return False, f"계정 {account_num} PW 라인 미발견"
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(f"\n# 계정 {account_num} 예약\n")
+            insert_idx = len(lines)
 
         sorted_slots = sorted(slots, key=lambda s: (s["date"], s["hour"], s["court"]))
         new_lines = [
@@ -352,6 +363,7 @@ def load_data():
         )
         accounts.append({
             "num":          a["num"],
+            "name":         a.get("name", ""),
             "user_id":      a["user_id"],
             "user_pw":      a.get("user_pw", ""),
             "color":        ACCOUNT_COLORS[(a["num"] - 1) % len(ACCOUNT_COLORS)],
@@ -496,6 +508,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .acct-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;background:var(--c)}
 .acct-num{font-size:10px;font-weight:700;color:#64748b;min-width:14px}
 .acct-id{font-size:12px;font-weight:700;color:#1e293b;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-name{font-size:11px;font-weight:600;color:#64748b;flex-shrink:0;max-width:62px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .acct-r2{display:flex;align-items:center;gap:3px;padding-left:20px}
 .pw-box{flex:1;border:none;background:#f1f5f9;border-radius:4px;padding:2px 5px;font-size:10px;color:#475569;font-family:monospace;outline:none;cursor:default}
 .pw-eye{background:none;border:none;cursor:pointer;font-size:11px;color:#94a3b8;padding:0;line-height:1}
@@ -568,7 +581,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .leg-taken{background:#f8fafc;border:1px dashed #e2e8f0}
 /* ── 포커스 반전 ── */
 .acct-card.fc{background:var(--c)!important;border-color:var(--c)!important}
-.acct-card.fc .acct-id,.acct-card.fc .acct-num,.acct-card.fc .acct-r3{color:#fff!important}
+.acct-card.fc .acct-id,.acct-card.fc .acct-num,.acct-card.fc .acct-name,.acct-card.fc .acct-r3{color:#fff!important}
 .acct-card.fc .pw-box{background:rgba(255,255,255,.2);color:#fff}
 .slot.hi{outline:2px solid rgba(255,255,255,.9);z-index:5;filter:brightness(1.12)}
 .slot.dfm{opacity:.07!important;pointer-events:none}
@@ -627,6 +640,7 @@ function buildSidebar() {
     <span class="acct-dot"></span>
     <span class="acct-num">${a.num}</span>
     <span class="acct-id" title="${a.user_id}">${a.user_id}</span>
+    ${a.name ? `<span class="acct-name" title="${a.name}">${a.name}</span>` : ''}
   </div>
   <div class="acct-r2">
     <input type="password" id="pw${a.num}" value="${a.user_pw}" class="pw-box" readonly>
@@ -977,11 +991,11 @@ function makeSlot(accts, dateStr, hr, ct) {
   }
   if (accts.length === 1) {
     const a = ACCOUNTS.find(x => x.num === accts[0]);
-    const tip = encodeURIComponent(`${a.user_id}\n${dateStr} ${timeStr}\n코트 ${ct}`);
+    const tip = encodeURIComponent(`${a.user_id}${a.name ? ' (' + a.name + ')' : ''}\n${dateStr} ${timeStr}\n코트 ${ct}`);
     return `<div class="slot booked" style="background:${a.color}" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}>${a.num}</div>`;
   }
   // 중복
-  const lines = accts.map(n => { const a = ACCOUNTS.find(x=>x.num===n); return `${a.num}: ${a.user_id}`; });
+  const lines = accts.map(n => { const a = ACCOUNTS.find(x=>x.num===n); return `${a.num}: ${a.user_id}${a.name ? ' (' + a.name + ')' : ''}`; });
   const tip = encodeURIComponent(`⚠ 중복 ${accts.length}건\n${lines.join('\n')}\n${dateStr} ${timeStr} 코트${ct}`);
   const [n1, n2] = accts;
   return `<div class="slot dup" data-a='${ad}' data-d="${dateStr}" data-h="${hr}" data-c="${ct}" data-tip="${tip}" ${oc}><span>${n1}</span><span>⚠${n2}</span></div>`;

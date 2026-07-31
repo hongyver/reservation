@@ -291,19 +291,70 @@ def _build_reservation_config():
     return _build_reservation_config_from_prefix("TENNIS")
 
 
-def load_accounts():
-    """다중 계정 설정을 환경변수에서 읽어 리스트로 반환.
+ACCOUNTS_FILE = Path(__file__).parent / "accounts.txt"
 
-    .env 예시:
-        TENNIS_ACCOUNT_1_ID=user1
-        TENNIS_ACCOUNT_1_PW=pass1
-        TENNIS_ACCOUNT_1_RESERVATION_1=2026-06-07:10:1
+
+def _parse_accounts_file(path):
+    """accounts.txt에서 계정 자격증명을 파싱한다.
+
+    형식: 이름,아이디,비밀번호  (콤마 구분, 이름은 비워도 됨)
+
+    - 행 번호(1부터) = 계정 번호. 빈 행·주석(#)·형식 오류 행도 번호를
+      차지하는 결번으로 처리한다 — 중간 행 삭제 시 빈 행으로 남겨야
+      .env의 TENNIS_ACCOUNT_N_RESERVATION_* 매핑이 밀리지 않는다.
+    - 비밀번호에 콤마·슬래시 등이 포함될 수 있으므로 split(",", 2)로
+      앞 2개 콤마만 분리한다 (셋째 필드 전체 = 비밀번호).
+    - 2필드 행(아이디,비밀번호)은 이름 생략으로 허용한다.
 
     Returns:
-        list of dict: [{"num": 1, "user_id": ..., "user_pw": ...,
-                        "reservation_config": {...} or None}, ...]
-        빈 리스트: TENNIS_ACCOUNT_* 환경변수 없음
+        dict: {계정번호: {"name": ..., "user_id": ..., "user_pw": ...}}
     """
+    creds = {}
+    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(",", 2)
+        if len(parts) == 2:
+            parts = [""] + parts
+        if len(parts) != 3:
+            print(f"[경고] accounts.txt {n}행 형식 오류 — 결번 처리: {raw!r}")
+            continue
+        name, uid, upw = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if not uid or not upw:
+            print(f"[경고] accounts.txt {n}행 아이디/비밀번호 누락 — 결번 처리")
+            continue
+        creds[n] = {"name": name, "user_id": uid, "user_pw": upw}
+    return creds
+
+
+def load_accounts():
+    """다중 계정 설정을 로드해 리스트로 반환.
+
+    자격증명 소스 우선순위:
+      1) accounts.txt (이름,아이디,비밀번호 — 행 번호 = 계정 번호)
+      2) .env의 TENNIS_ACCOUNT_N_ID/PW 환경변수 (파일 없을 때 폴백)
+
+    예약 조건은 소스와 무관하게 .env의 TENNIS_ACCOUNT_N_* 환경변수에서 조립한다.
+
+    Returns:
+        list of dict: [{"num": 1, "name": ..., "user_id": ..., "user_pw": ...,
+                        "reservation_config": {...} or None}, ...]
+        빈 리스트: accounts.txt 없음 + TENNIS_ACCOUNT_* 환경변수 없음
+    """
+    if ACCOUNTS_FILE.exists():
+        return [
+            {
+                "num": n,
+                "name": cred["name"],
+                "user_id": cred["user_id"],
+                "user_pw": cred["user_pw"],
+                "reservation_config":
+                    _build_reservation_config_from_prefix(f"TENNIS_ACCOUNT_{n}"),
+            }
+            for n, cred in sorted(_parse_accounts_file(ACCOUNTS_FILE).items())
+        ]
+
     accounts = []
     for n in range(1, 100):
         uid = os.environ.get(f"TENNIS_ACCOUNT_{n}_ID", "").strip()
@@ -313,6 +364,7 @@ def load_accounts():
         res_cfg = _build_reservation_config_from_prefix(f"TENNIS_ACCOUNT_{n}")
         accounts.append({
             "num": n,
+            "name": "",
             "user_id": uid,
             "user_pw": upw,
             "reservation_config": res_cfg,

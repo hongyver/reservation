@@ -344,7 +344,8 @@ def main():
         accounts = config.load_accounts()
         acct = next((a for a in accounts if a["num"] == args.account), None)
         if not acct:
-            print(f"[ERROR] .env에 TENNIS_ACCOUNT_{args.account}_ID/PW가 없습니다.")
+            print(f"[ERROR] accounts.txt {args.account}행 또는 .env의 "
+                  f"TENNIS_ACCOUNT_{args.account}_ID/PW에 계정이 없습니다.")
             sys.exit(1)
         config.USER_ID = acct["user_id"]
         config.USER_PW = acct["user_pw"]
