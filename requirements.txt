@@ -7,3 +7,6 @@ aiohttp>=3.9.0
 # 브라우저 기반 (로컬 PC용 - 선택사항)
 selenium>=4.15.0
 webdriver-manager>=4.0.0
+
+# 예약 현황 뷰어 (공휴일 수요 계산)
+holidays>=0.100

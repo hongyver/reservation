@@ -388,6 +388,19 @@ def load_settings():
     }
 
 
+def load_holidays(years):
+    """대한민국 공휴일(대체공휴일·음력 공휴일 포함)을 "YYYY-MM-DD" 목록으로 반환한다.
+
+    holidays 패키지 미설치 시 빈 목록 — 카운터의 공휴일 수요만 빠진다.
+    """
+    try:
+        import holidays as _holidays
+    except ImportError:
+        print("[viewer] holidays 패키지 없음 — 공휴일 수요 미반영 (pip3 install holidays)")
+        return []
+    return sorted(d.isoformat() for d in _holidays.KR(years=list(years)))
+
+
 def get_initial_month(accounts):
     """예약 데이터 중 가장 빠른 연월을 반환한다."""
     dates = [r["date"] for a in accounts for r in a["reservations"]]
@@ -484,6 +497,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .hdr-info{font-size:12px;font-weight:600;color:#cbd5e1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px}
 .hdr-num{width:46px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:4px;color:#fff;font-size:12px;font-weight:700;text-align:center;padding:2px 4px;outline:none}
 .hdr-num:focus{border-color:rgba(255,255,255,.6);background:rgba(255,255,255,.2)}
+.hdr-info.short{background:rgba(239,68,68,.3);border-color:rgba(239,68,68,.65);color:#fecaca}
 
 /* 헤더 모드 토글 (배치/검색) */
 .mode-seg{display:flex;border:1px solid rgba(255,255,255,.3);border-radius:7px;overflow:hidden;margin:0 4px}
@@ -605,7 +619,7 @@ let _saveSeq = 0;         // race condition 방지 — 마지막 요청 번호
 let dispatchDays = new Set();      // 배치 모드 선택 날짜 "YYYY-MM-DD" — 재배치(.env)에만 사용
 let searchDays = new Set();        // 검색 모드 선택 날짜 "YYYY-MM-DD" — 빈자리 검색에만 사용
 let selMode = 'dispatch';          // 날짜 체크박스가 편집하는 대상: 'dispatch' | 'search'
-let initializedMonths = new Set(); // 주말 기본 선택을 마친 월 "YYYY-MM"
+let initializedMonths = new Set(); // 기본 선택(토·일·공휴일)을 마친 월 "YYYY-MM"
 let availSlots = new Set();        // 검색 결과 빈자리 "YYYY-MM-DD:시간:코트"
 let closedDates = new Set();       // 휴장일 추정 날짜 "YYYY-MM-DD"
 let searchedDates = new Set();     // 검색을 수행한 날짜 "YYYY-MM-DD"
@@ -693,16 +707,16 @@ function modeDays() {
 }
 
 function ensureMonthDefaults() {
-  // 처음 표시하는 월은 두 모드 모두 토·일을 기본 선택.
-  // 이미 초기화한 월은 건너뛰어 사용자가 해제한 주말이 되살아나지 않게 한다.
+  // 처음 표시하는 월은 두 모드 모두 토·일·공휴일을 기본 선택.
+  // 이미 초기화한 월은 건너뛰어 사용자가 해제한 날짜가 되살아나지 않게 한다.
   const mKey = `${CY}-${String(CM).padStart(2,'0')}`;
   if (initializedMonths.has(mKey)) return;
   initializedMonths.add(mKey);
   const lastDay = new Date(CY, CM, 0).getDate();
   for (let d = 1; d <= lastDay; d++) {
     const dow = new Date(CY, CM - 1, d).getDay(); // 0=일, 6=토
-    if (dow === 0 || dow === 6) {
-      const ds = `${mKey}-${String(d).padStart(2,'0')}`;
+    const ds = `${mKey}-${String(d).padStart(2,'0')}`;
+    if (dow === 0 || dow === 6 || HOLIDAYS.has(ds)) {
       dispatchDays.add(ds);
       searchDays.add(ds);
     }
@@ -711,6 +725,7 @@ function ensureMonthDefaults() {
 
 function toggleDay(dateStr, on) {
   on ? modeDays().add(dateStr) : modeDays().delete(dateStr);
+  updateCapacity();
 }
 
 function setMode(m) {
@@ -840,6 +855,7 @@ function buildCalendar() {
       .forEach(el => el.classList.add('ckd'));
   });
   refreshFocus();
+  updateCapacity();
 }
 
 /* ── 포커스(반전) ── */
@@ -950,6 +966,7 @@ async function saveSlotsPerAccount(el) {
   if (isNaN(v) || v < 1)   v = 1;
   if (v > 10)              v = 10;
   el.value = v;  // 정규화된 값으로 표시 복원
+  updateCapacity();
   try {
     const resp = await fetch('/api/save-slots-per-account', {
       method: 'POST',
@@ -1010,47 +1027,36 @@ function shuffle(arr) {
   return arr;
 }
 
-/* ── 재배치 ── */
-async function redistribute() {
-  // 1. 달력에서 체크된 재배치 대상 날짜 수집 (기본: 토·일)
-  ensureMonthDefaults();
-  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
-  const targetDays = [...dispatchDays]
-    .filter(ds => ds.startsWith(pfx))
-    .map(ds => +ds.split('-')[2])
-    .sort((a, b) => a - b);
-  if (!targetDays.length) { showToast('선택된 날짜 없음', true); return; }
-  if (!ACCOUNTS.length)   { showToast('계정 없음', true); return; }
-
-  // 2. 슬롯 풀 생성 — 우선순위별 섹션으로 구분
-  //    토(dow=6): 8시 3코트 / 그 외(일·평일): 8시 4코트
-  //    6시: 3코트/일 랜덤 / 10시: 1코트/일 랜덤
+/* ── 슬롯 풀 & 배정 (재배치·상단 가능/필요 카운터 공용) ── */
+function buildPool(targetDays, pfx) {
+  // 우선순위별 섹션으로 구분
+  //   8시: 토(dow=6) 3코트(1→2→3) / 그 외(일·평일) 4코트(1→2→3→4)
+  //   6시: 3코트(1→2→3) / 10시: 1코트(1번)
+  // 미선택(유지) 계정이 이미 가진 슬롯은 풀에서 제외 —
+  // 재배치가 선택 계정만 교체하므로 유지 예약과의 중복(정각 충돌)을 막는다
+  const kept = new Set(
+    ACCOUNTS.filter(a => !selected.has(a.num))
+      .flatMap(a => a.reservations.map(r => `${r.date}:${r.hour}:${r.court}`))
+  );
   const sec8 = [], sec6 = [], sec10 = [];
+  const push = (arr, ds, hour, court) => {
+    if (!kept.has(`${ds}:${hour}:${court}`)) arr.push({ date: ds, hour, court });
+  };
   targetDays.forEach(day => {
-    const ds     = `${pfx}-${String(day).padStart(2,'0')}`;
-    const dow    = new Date(CY, CM - 1, day).getDay();
-    const isSat  = dow === 6;
-
-    // 8시: 토 3코트(1→2→3), 그 외 4코트(1→2→3→4)
-    const courts8 = isSat ? [1,2,3] : [1,2,3,4];
-    courts8.forEach(c => sec8.push({ date: ds, hour: 8,  court: c }));
-
-    // 6시: 3코트(1→2→3)
-    [1,2,3].forEach(c => sec6.push({ date: ds, hour: 6,  court: c }));
-
-    // 10시: 1코트(1번)
-    sec10.push({ date: ds, hour: 10, court: 1 });
+    const ds    = `${pfx}-${String(day).padStart(2,'0')}`;
+    const isSat = new Date(CY, CM - 1, day).getDay() === 6;
+    (isSat ? [1,2,3] : [1,2,3,4]).forEach(c => push(sec8, ds, 8, c));
+    [1,2,3].forEach(c => push(sec6, ds, 6, c));
+    push(sec10, ds, 10, 1);
   });
-  // 섹션 내부 셔플(날짜 간 순서 랜덤) → 우선순위 순으로 연결
-  shuffle(sec8); shuffle(sec6); shuffle(sec10);
-  const pool = [...sec8, ...sec6, ...sec10];
+  return [sec8, sec6, sec10];
+}
 
-  // 3. 계정당 N개 배정 (헤더 입력값, .env TENNIS_SLOTS_PER_ACCOUNT)
-  //    하드 제약: 동일 날짜 금지 — 서버가 계정당 1일 1건만 허용하므로
-  //    같은 계정에 같은 날짜가 배정되면 정각에 한 건은 반드시 실패한다
-  const perAcct = parseInt(document.getElementById('slotsPer').value, 10) || 4;
+function assignPool(pool, accounts, perAcct) {
+  // 하드 제약: 동일 날짜 금지 — 서버가 계정당 1일 1건만 허용하므로
+  // 같은 계정에 같은 날짜가 배정되면 정각에 한 건은 반드시 실패한다
   const used = new Array(pool.length).fill(false);
-  const assignments = ACCOUNTS.map(a => {
+  return accounts.map(a => {
     const slots = [];
     const assignedDates = new Set();
 
@@ -1066,12 +1072,65 @@ async function redistribute() {
 
     return { account_num: a.num, slots };
   });
+}
 
-  // 4. 결과 요약 & 확인
+/* ── 필요 수: 체크된 배치 날짜 수요 ── */
+function checkedDemand() {
+  // 토 7(6시3+8시3+10시1) / 그 외(일·평일·공휴일) 8(6시3+8시4+10시1)
+  // buildPool의 날짜당 슬롯 구성과 동일한 규칙
+  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
+  let need = 0;
+  dispatchDays.forEach(ds => {
+    if (!ds.startsWith(pfx)) return;
+    const day = +ds.split('-')[2];
+    need += new Date(CY, CM - 1, day).getDay() === 6 ? 7 : 8;
+  });
+  return need;
+}
+
+/* ── 상단 가능/필요 카운터 ── */
+function updateCapacity() {
+  // 가능 = 선택 계정 수 × 계정당 배정 수 (용량) / 필요 = 체크된 배치 날짜 수요
+  const el = document.getElementById('capText');
+  if (!el) return;
+  const numAccts = ACCOUNTS.filter(a => selected.has(a.num)).length;
+  // 입력 중(oninput)에도 호출되므로 범위를 벗어난 임시 값은 1~10으로 클램프
+  const perAcct = Math.min(10, Math.max(1,
+    parseInt(document.getElementById('slotsPer').value, 10) || 4));
+  const possible = numAccts * perAcct;
+  const need = checkedDemand();
+  el.textContent = `${possible}/${need}`;
+  document.getElementById('capBox').classList.toggle('short', possible < need);
+}
+
+/* ── 재배치 ── */
+async function redistribute() {
+  // 1. 달력에서 체크된 재배치 대상 날짜 수집 (기본: 토·일)
+  ensureMonthDefaults();
+  const pfx = `${CY}-${String(CM).padStart(2,'0')}`;
+  const targetDays = [...dispatchDays]
+    .filter(ds => ds.startsWith(pfx))
+    .map(ds => +ds.split('-')[2])
+    .sort((a, b) => a - b);
+  if (!targetDays.length) { showToast('선택된 날짜 없음', true); return; }
+  const accts = ACCOUNTS.filter(a => selected.has(a.num));
+  if (!accts.length) { showToast('선택된 계정 없음', true); return; }
+
+  // 2. 슬롯 풀 생성 — 섹션 내부 셔플(날짜 간 순서 랜덤) → 우선순위 순으로 연결
+  const [sec8, sec6, sec10] = buildPool(targetDays, pfx);
+  shuffle(sec8); shuffle(sec6); shuffle(sec10);
+  const pool = [...sec8, ...sec6, ...sec10];
+
+  // 3. 계정당 N개 배정 (헤더 입력값, .env TENNIS_SLOTS_PER_ACCOUNT)
+  const perAcct = parseInt(document.getElementById('slotsPer').value, 10) || 4;
+  const assignments = assignPool(pool, accts, perAcct);
+
+  // 4. 결과 요약 & 확인 — 선택일 수요 vs 계정 용량(예약인 × 인당 개수) 비교
   const totalSlots = assignments.reduce((s, a) => s + a.slots.length, 0);
-  const need       = ACCOUNTS.length * perAcct;
-  let msg = `${CY}년 ${CM}월 배치 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → ${ACCOUNTS.length}개 계정에 ${totalSlots}개 배정\n기존 예약은 모두 교체됩니다. 계속?`;
-  if (totalSlots < need) msg = `⚠ 슬롯 부족 (필요 ${need}개, 가능 ${totalSlots}개)\n` + msg;
+  const capacity   = accts.length * perAcct;
+  const demand     = checkedDemand();
+  let msg = `${CY}년 ${CM}월 배치 선택일 ${targetDays.length}일\n풀 ${pool.length}개 슬롯 → 선택 계정 ${accts.length}개에 ${totalSlots}개 배정\n선택 계정의 기존 예약만 교체됩니다 (미선택 계정 유지). 계속?`;
+  if (capacity < demand) msg = `⚠ 용량 부족: 선택일 수요 ${demand}개 > 예약인 ${accts.length}명 × 인당 ${perAcct}개 = ${capacity}개\n` + msg;
   if (!confirm(msg)) return;
 
   // 5. API 호출
@@ -1166,6 +1225,8 @@ function bindTips() {
 
 def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
     data_json = json.dumps(accounts, ensure_ascii=False)
+    # 월 이동은 클라이언트에서만 일어나므로 초기 연도 ±1~2년 치 공휴일을 미리 심는다
+    holidays_json = json.dumps(load_holidays(range(init_year - 1, init_year + 3)))
     login_adv = (settings or {}).get("login_advance_minutes", 10)
     slots_per = (settings or {}).get("slots_per_account", 4)
     return f"""<!DOCTYPE html>
@@ -1181,8 +1242,9 @@ def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
   <header class="app-header">
     <h1>🎾 고양시 테니스장 예약 현황</h1>
     <div class="header-btns">
+      <span class="hdr-info" id="capBox" title="가능 = 선택 계정 × 계정당 배정 수 / 필요 = 체크된 배치 날짜 수요 — 토 7(6시3+8시3+10시1), 그 외(일·평일·공휴일) 8(6시3+8시4+10시1)">📊 가능/필요 <b id="capText">-</b></span>
       <span class="hdr-info">⏱ 오픈 <input id="loginAdv" type="number" min="1" max="120" value="{login_adv}" class="hdr-num" onchange="saveLoginAdvance(this)">분 전 로그인 시작</span>
-      <span class="hdr-info">👤 계정당 <input id="slotsPer" type="number" min="1" max="10" value="{slots_per}" class="hdr-num" onchange="saveSlotsPerAccount(this)">개 배정</span>
+      <span class="hdr-info">👤 계정당 <input id="slotsPer" type="number" min="1" max="10" value="{slots_per}" class="hdr-num" oninput="updateCapacity()" onchange="saveSlotsPerAccount(this)">개 배정</span>
       <div class="mode-seg">
         <button id="modeDispatch" class="seg on" onclick="setMode('dispatch')">🔀 배치 모드</button>
         <button id="modeSearch" class="seg" onclick="setMode('search')">🔍 검색 모드</button>
@@ -1223,6 +1285,7 @@ def build_html(accounts, init_year, init_month, api_port=8765, settings=None):
 <div id="tip"></div>
 <script>
 const ACCOUNTS = {data_json};
+const HOLIDAYS = new Set({holidays_json});
 {_JS}
 </script>
 </body>
